@@ -21,7 +21,7 @@
    (DevOps), учебник «Rust: ownership и borrowing», «HTTP Cache-Control»
    (Frontend; удалена и восстановлена через `/undo` при проверке).
 4. **По желанию:** для проверки сайта в браузере я поставил headless Chromium
-   в `~/.cache/ms-playwright` (~200 МБ) — `rm -rf ~/.cache/ms-playwright`, если не нужен.
+   в `~/.cache/ms-playwright` (328 МБ) — `rm -rf ~/.cache/ms-playwright`, если не нужен.
 
 ## Примеры первых сообщений боту
 
