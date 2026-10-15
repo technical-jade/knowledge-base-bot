@@ -35,15 +35,20 @@ def url(site_url: str, path: str) -> str:
 
 
 def sections(repo: Path) -> dict[str, str]:
-    """папка раздела → название."""
-    out = {}
+    """папка раздела → название, в порядке меню сайта (order, затем название)."""
     docs = repo / "docs"
     if not docs.is_dir():
-        return out
-    for d in sorted(docs.iterdir()):
+        return {}
+    found = []
+    for d in docs.iterdir():
         if d.is_dir() and (d / "index.md").is_file():
-            out[d.name] = str(_meta(d / "index.md").get("title") or d.name)
-    return out
+            m = _meta(d / "index.md")
+            try:
+                order = float(m.get("order", 1000))
+            except (TypeError, ValueError):
+                order = 1000.0
+            found.append((order, str(m.get("title") or d.name), d.name))
+    return {key: title for _, title, key in sorted(found)}
 
 
 def articles(repo: Path) -> list[Article]:

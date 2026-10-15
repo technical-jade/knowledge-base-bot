@@ -306,3 +306,39 @@ def test_task_journal(env):
     run(core, "/help")
     rows = core.store.tasks()
     assert rows[0][2] == "/help" and rows[0][3] == "ok"
+
+
+def test_prune_conflicts(tmp_path):
+    import os
+    import time
+
+    from kbbot.core import _prune_conflicts
+    old, new = tmp_path / "old.patch", tmp_path / "new.patch"
+    old.write_text("x")
+    new.write_text("y")
+    os.utime(old, (time.time() - 40 * 86400,) * 2)
+    _prune_conflicts(tmp_path)
+    assert not old.exists() and new.exists()
+
+
+def test_write_prompts_carry_json_spec(env):
+    core, sc, calls, *_ = env
+    sc(route={"intent": "new", "args": {"topic": "x", "style": "dev"}},
+       write=[{"files": {"docs/devops/test.md": GOOD}, "result": "без json"},
+              {"files": {}, "result": result()}])
+    r = run(core, "напиши")
+    assert r.sent[-1][0].startswith("Готово")
+    writes = [c for c in calls() if c["mode"] == "write"]
+    assert all('"action": "created|edited|moved|deleted"' in c["prompt"] for c in writes)
+
+
+def test_move_when_claude_copied_file_itself(env):
+    core, sc, calls, seed, _ = env
+    moved = result("moved", "docs/devops/old.md", "Перенос: Старая → devops",
+                   **{"from": "docs/misc/old.md", "to": "docs/devops/old.md"})
+    sc(route={"intent": "edit", "args": {"target": "docs/misc/old.md", "instruction": "перенеси", "move_to": "devops"}},
+       write=[{"files": {"docs/devops/old.md": GOOD}, "result": moved}, {"files": {}, "result": moved}])
+    r = run(core, "перенеси old в devops")
+    assert r.sent[-1][0].startswith("Перенесено"), r.sent[-1][0]
+    sh(seed, "pull", "-q")
+    assert (seed / "docs/devops/old.md").exists() and not (seed / "docs/misc/old.md").exists()

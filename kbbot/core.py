@@ -36,6 +36,21 @@ STYLES = [
 STYLE_NAMES = dict(STYLES)
 FIX_ATTEMPTS = 2
 
+RESUME_NOTE = (
+    "(Служебное: бот откатывает изменения неудачных попыток — файлы могли не сохраниться. "
+    "Сверяйся с фактическим состоянием файлов, а не с историей разговора.)\n\n"
+)
+
+# Напоминание о формате в каждом промпте записи: сессия чата («сделай из
+# этого статью») создана в режиме read и формата из write.md не знает —
+# найдено фактом: Claude возвращал action "create" и поле url
+JSON_SPEC = (
+    "\n\nЗакончи ответ итоговым JSON в блоке ```json — строго такие поля:\n"
+    '{"action": "created|edited|moved|deleted", "files": ["docs/…"], "primary": "docs/….md", '
+    '"section": "<папка раздела>", "summary": "<сообщение коммита по-русски>"}\n'
+    "Для moved — ещё from и to. Пути — от корня репозитория, внутри docs/."
+)
+
 AUTH_MSG = (
     "Claude не авторизован: обнови токен (`claude setup-token`) и запиши его на jade:\n\n"
     "```\nsudo -u kb-claude sh -c 'read -r t; printf \"%s\" \"$t\" > /etc/kb-claude/token'\n```"
@@ -185,6 +200,7 @@ class Core:
         finally:
             await resp.done()
             self.store.prune()
+            _prune_conflicts(self.cfg.paths.conflicts)
 
     # ---------- маршрутизация ----------
 
@@ -381,7 +397,9 @@ class Core:
         if args.get("move_to"):
             prompt = (
                 f"[move]\nСтатья: {path}\nПеренести в раздел: {args['move_to']}\n"
-                f"Просьба человека: {text}\nСегодня: {today()}"
+                f"Просьба человека: {text}\nСегодня: {today()}\n"
+                "Новый файл НЕ создавай и старый не меняй: верни action \"moved\" с from и to — "
+                "файл перенесёт бот (git mv), потом попросит поправить ссылки."
             )
         else:
             prompt = (
@@ -430,7 +448,7 @@ class Core:
 
     async def _claude_write(self, resp: Responder, prompt: str, resume: str | None) -> claude.ClaudeResult:
         return await claude.run(
-            self.cfg.claude_cmd, "write", prompt, resume=resume, timeout=self.cfg.task_timeout, on_status=resp.status,
+            self.cfg.claude_cmd, "write", prompt + JSON_SPEC, resume=resume, timeout=self.cfg.task_timeout, on_status=resp.status,
         )
 
     async def _guard(self) -> None:
@@ -453,6 +471,10 @@ class Core:
             await resp.status("Обновляю репозиторий…")
             await self._pull()
             await asyncio.to_thread(self.repo.rollback)
+            if resume:
+                # В продолжаемой сессии могли остаться «воспоминания» о попытке,
+                # которую бот откатил, — найдено фактом: Claude отвечал «уже написал»
+                prompt = RESUME_NOTE + prompt
             try:
                 return await self._change_locked(resp, prompt, resume, article, chat, expect_delete)
             except BaseException:
@@ -485,9 +507,14 @@ class Core:
             src, dst = wr.src, wr.dst
             if not (self.cfg.paths.repo / src).is_file():
                 raise TaskFailed(f"Перенос: файла `{src}` нет — отменено.")
-            if (self.cfg.paths.repo / dst).exists():
+            dst_new = dst in await asyncio.to_thread(self.repo.untracked)
+            if (self.cfg.paths.repo / dst).exists() and not dst_new:
                 raise TaskFailed(f"Перенос: `{dst}` уже существует — отменено.")
-            await asyncio.to_thread(self.repo.mv, src, dst)
+            if dst_new:
+                # Claude сам записал копию в новый раздел — оставляем её, старый файл удаляем
+                await asyncio.to_thread(self.repo.rm, [src])
+            else:
+                await asyncio.to_thread(self.repo.mv, src, dst)
             await resp.status("Правлю ссылки…")
             res = await self._claude_write(
                 resp,
@@ -591,6 +618,22 @@ class Core:
         commit = self.repo.head()
         await publish_release(self.cfg, commit)
         return commit
+
+
+CONFLICT_KEEP_DAYS = 30
+
+
+def _prune_conflicts(d: Path) -> None:
+    """Патчи конфликтов старше 30 дней удаляются (этап 7: ротация)."""
+    if not d.is_dir():
+        return
+    limit = time.time() - CONFLICT_KEEP_DAYS * 86400
+    for p in d.glob("*.patch"):
+        try:
+            if p.stat().st_mtime < limit:
+                p.unlink()
+        except OSError:
+            pass
 
 
 def _problems_md(problems) -> str:

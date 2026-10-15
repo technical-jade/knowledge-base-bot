@@ -71,6 +71,10 @@ class Repo:
             i += 1
         return paths
 
+    def untracked(self) -> list[str]:
+        out = self.git("ls-files", "--others", "--exclude-standard", "-z")
+        return [p for p in out.split("\0") if p]
+
     def outside_docs(self) -> list[str]:
         return [p for p in self.changed() if not p.startswith("docs/")]
 

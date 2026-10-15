@@ -1,6 +1,7 @@
 # Образ kb-build: установка зависимостей и сборка VitePress.
 # Секретов в образе и при запуске нет; пользователь задаётся при `docker run`.
 FROM node:24.22.0-slim
+LABEL kb-bot=kb-build
 
 ARG PNPM_VERSION=12.11.2
 ENV COREPACK_HOME=/opt/corepack \

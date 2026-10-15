@@ -63,6 +63,8 @@ step "образ kb-build"
 pnpm_ver=$(python3 -c 'import json;print(json.load(open("/srv/kb/repo/package.json"))["packageManager"].split("@")[1].split("+")[0])')
 docker build -q --build-arg "PNPM_VERSION=$pnpm_ver" -t kb-build "$SRC/deploy" >/dev/null
 echo "kb-build (pnpm $pnpm_ver)"
+# Предыдущие версии образа после пересборки становятся безымянными — убираем
+docker image prune -f --filter label=kb-bot=kb-build >/dev/null
 
 step "Claude для kb-claude"
 install -d -o kb-claude -g kb-claude -m 700 /home/kb-claude/.claude

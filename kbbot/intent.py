@@ -119,9 +119,18 @@ class WriteResult:
     dst: str | None = None
 
 
+_ACTION_ALIASES = {
+    "create": "created", "new": "created", "add": "created", "added": "created",
+    "edit": "edited", "update": "edited", "updated": "edited", "modified": "edited",
+    "move": "moved", "rename": "moved", "renamed": "moved",
+    "delete": "deleted", "remove": "deleted", "removed": "deleted",
+}
+
+
 def parse_write_result(text: str) -> WriteResult:
     obj = last_json(text)
     action = obj.get("action")
+    action = _ACTION_ALIASES.get(action, action) if isinstance(action, str) else action
     if action not in ACTIONS:
         raise ParseError(f"неизвестное action: {action!r}")
     files = obj.get("files") or []

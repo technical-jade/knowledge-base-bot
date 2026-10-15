@@ -45,3 +45,8 @@ def test_write_result():
         parse_write_result('{"action":"created","files":["../../etc/x.md"]}')
     with pytest.raises(ParseError):
         parse_write_result('{"action":"deleted","files":[]}')
+
+
+def test_write_result_action_aliases():
+    r = parse_write_result('{"action":"create","files":["docs/a/b.md"],"primary":"docs/a/b.md","url":"x","summary":"s"}')
+    assert r.action == "created"
