@@ -1,0 +1,40 @@
+[Unit]
+Description=kb-bot — Telegram-бот базы знаний
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=kb
+Group=kb
+WorkingDirectory=/opt/kb-bot
+EnvironmentFile=/etc/kb-bot/env
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/kb-bot/venv/bin/python -m kbbot
+Restart=on-failure
+RestartSec=5
+# Ошибка конфигурации (код 2) — перезапуск не поможет
+RestartPreventExitStatus=2
+StartLimitIntervalSec=300
+StartLimitBurst=5
+# docs/ общая с kb-claude: файлы группы kb-docs должны оставаться 664
+UMask=0002
+TimeoutStopSec=30
+
+MemoryMax=2G
+CPUQuota=200%
+TasksMax=512
+
+# NoNewPrivileges нельзя: бот вызывает sudo (Claude и сборка).
+# Остальное ужесточение наследуют дочерние процессы, поэтому всё, куда
+# пишут Claude (~kb-claude) и git (~kb), перечислено явно.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/srv/kb /var/lib/kb-bot /home/kb-claude /home/kb /run
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

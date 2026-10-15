@@ -1,0 +1,42 @@
+[Unit]
+Description=kb-web — статика базы знаний для tailscale serve
+After=network.target
+
+[Service]
+Type=exec
+User=kb
+Group=kb
+WorkingDirectory=/opt/kb-bot
+ExecStart=/opt/kb-bot/venv/bin/python -m kbbot.web --bind 127.0.0.1 --port 8090 --root /srv/kb/site
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+Restart=on-failure
+RestartSec=3
+
+# Только читает /srv/kb и слушает loopback
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/srv/kb
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+IPAddressDeny=any
+IPAddressAllow=localhost
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,75 @@
+#!/bin/bash
+# Запуск контейнера сборки базы знаний. Вызывается ботом (пользователь kb)
+# через sudo; аргументы фиксированы: install | build.
+# Доступ к Docker = root, поэтому kb не в группе docker, а всё, что может
+# сделать kb, — этот скрипт с этими двумя действиями.
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+IMAGE=kb-build
+REPO=/srv/kb/repo
+OUT=/srv/kb/build-out
+NM_VOLUME=kb-node-modules
+STORE_VOLUME=kb-pnpm-store
+
+die() { echo "kb-build-run: $*" >&2; exit 2; }
+
+[[ $# -eq 1 ]] || die "usage: kb-build-run install|build"
+ACTION=$1
+[[ $ACTION == install || $ACTION == build ]] || die "неизвестное действие: $ACTION"
+
+UID_KB=$(id -u kb)
+GID_KB=$(id -g kb)
+
+# Выход сборки — обычная папка kb; проверяем, что это не подменённая ссылка
+[[ -d $OUT && ! -L $OUT ]] || die "$OUT должен быть папкой"
+[[ $(stat -c %u "$OUT") == "$UID_KB" ]] || die "$OUT должен принадлежать kb"
+
+exec 9>/run/kb-build.lock
+flock -w 1800 9 || die "сборка уже идёт"
+
+COMMON=(
+    --rm --read-only
+    --user "$UID_KB:$GID_KB"
+    --memory 1.5g --memory-swap 1.5g --cpus 2 --pids-limit 512
+    --cap-drop ALL --security-opt no-new-privileges
+    --tmpfs /work:rw,size=1g,mode=1777
+    --tmpfs /tmp:rw,size=256m,mode=1777
+    -v "$REPO:/src:ro"
+)
+
+run_install() {
+    for v in "$NM_VOLUME" "$STORE_VOLUME"; do
+        docker volume create "$v" >/dev/null
+        # Новый том принадлежит root — отдаём корень тома пользователю kb
+        docker run --rm --network none -v "$v:/v" --user 0 --entrypoint chown "$IMAGE" "$UID_KB:$GID_KB" /v
+    done
+    # С сетью, но без секретов: окружение не передаётся, порты не публикуются
+    docker run "${COMMON[@]}" --name "kb-install-$$" \
+        -v "$NM_VOLUME:/work/node_modules" \
+        -v "$STORE_VOLUME:/store" \
+        "$IMAGE" kb-build-inner install
+}
+
+run_build() {
+    docker run "${COMMON[@]}" --name "kb-build-$$" --network none \
+        -v "$NM_VOLUME:/work/node_modules:ro" \
+        -v "$OUT:/out" \
+        "$IMAGE" kb-build-inner build
+}
+
+case $ACTION in
+install) run_install ;;
+build)
+    rc=0
+    run_build || rc=$?
+    if [[ $rc -eq 3 ]]; then
+        # pnpm-lock.yaml изменился (или тома ещё нет) — установка и повтор
+        echo "kb-build-run: зависимости устарели, устанавливаю" >&2
+        run_install
+        run_build
+    else
+        exit $rc
+    fi
+    ;;
+esac

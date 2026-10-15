@@ -1,0 +1,55 @@
+#!/bin/bash
+# Единственный способ, которым бот запускает Claude:
+#   sudo -u kb-claude /usr/local/bin/kb-claude-run <route|read|write> [--resume <uuid>]
+# Промпт — через stdin, ответ — stream-json в stdout.
+# Режимы и наборы инструментов зашиты здесь; Bash недоступен ни в одном.
+set -euo pipefail
+export PATH=/usr/local/bin:/usr/bin:/bin
+umask 002
+
+die() { echo "kb-claude-run: $*" >&2; exit 2; }
+
+[[ $(id -un) == kb-claude ]] || die "запускать только от kb-claude"
+
+MODE=${1:-}
+shift || true
+RESUME=()
+if [[ $# -gt 0 ]]; then
+    [[ $# -eq 2 && $1 == --resume ]] || die "лишние аргументы"
+    [[ $2 =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die "некорректный uuid сессии"
+    RESUME=(--resume "$2")
+fi
+
+case $MODE in
+route) TOOLS="" ;;
+read)  TOOLS="Read,Glob,Grep,WebSearch,WebFetch" ;;
+write) TOOLS="Read,Glob,Grep,Edit,Write,WebSearch,WebFetch" ;;
+*) die "неизвестный режим: ${MODE:-<пусто>}" ;;
+esac
+
+PROMPTS=/opt/kb-bot/prompts
+[[ -f $PROMPTS/$MODE.md ]] || die "нет промпта $PROMPTS/$MODE.md"
+SYSTEM=$(cat "$PROMPTS/$MODE.md")
+# Описание бота нужно и роутеру, и чату (вопросы «как тебя использовать»)
+[[ $MODE != write && -f $PROMPTS/about.md ]] && SYSTEM+=$'\n\n'$(cat "$PROMPTS/about.md")
+
+TOKEN=$(cat /etc/kb-claude/token 2>/dev/null) || die "нет токена /etc/kb-claude/token"
+[[ -n $TOKEN ]] || die "токен Claude пустой"
+
+# sudo уже сбросил окружение; выставляем только нужное
+export HOME=/home/kb-claude
+export CLAUDE_CODE_OAUTH_TOKEN=$TOKEN
+export DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
+unset TOKEN
+
+cd /srv/kb/repo
+exec "$HOME/.local/bin/claude" -p \
+    --model opus \
+    --output-format stream-json --verbose \
+    --tools "$TOOLS" \
+    --allowedTools "$TOOLS" \
+    --disallowedTools "Bash,BashOutput,KillShell,NotebookEdit,Task,Agent,TodoWrite,Skill,SlashCommand,ExitPlanMode" \
+    --strict-mcp-config \
+    --setting-sources user,project \
+    --append-system-prompt "$SYSTEM" \
+    "${RESUME[@]}"

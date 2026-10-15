@@ -1,0 +1,5 @@
+# kb-bot: единственные команды, которые бот (kb) может выполнить через sudo.
+# Аргументы проверяют сами обёртки; окружение сбрасывается (env_reset).
+Defaults:kb env_reset
+kb ALL=(kb-claude) NOPASSWD: /usr/local/bin/kb-claude-run
+kb ALL=(root) NOPASSWD: /usr/local/bin/kb-build-run install, /usr/local/bin/kb-build-run build

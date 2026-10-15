@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash",
+      "Bash(*)",
+      "Read(//etc/**)",
+      "Read(//home/**)",
+      "Read(//root/**)",
+      "Read(//var/**)",
+      "Read(//opt/**)",
+      "Edit(//srv/kb/repo/.vitepress/**)",
+      "Edit(//srv/kb/repo/.git/**)",
+      "Edit(//srv/kb/repo/CLAUDE.md)",
+      "Write(//srv/kb/repo/.vitepress/**)",
+      "Write(//srv/kb/repo/.git/**)",
+      "Write(//srv/kb/repo/CLAUDE.md)"
+    ]
+  },
+  "includeCoAuthoredBy": false,
+  "cleanupPeriodDays": 30,
+  "env": {
+    "DISABLE_TELEMETRY": "1"
+  }
+}

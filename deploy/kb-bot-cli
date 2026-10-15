@@ -1,0 +1,16 @@
+#!/bin/bash
+# Самопроверка без Telegram: тот же конвейер, вывод в терминал.
+#   kb-bot-cli "напиши гайд по Docker volumes"
+#   kb-bot-cli --reply <message_id> "сделай короче"   (правка «ответом»)
+#   kb-bot-cli --choose dev "…"                        (ответ на кнопки стиля)
+# Запускается от kb (сам переключается через sudo).
+set -euo pipefail
+if [[ $(id -un) != kb ]]; then
+    exec sudo -u kb -H "$0" "$@"
+fi
+set -a
+. /etc/kb-bot/env
+set +a
+umask 002
+cd /opt/kb-bot
+exec /opt/kb-bot/venv/bin/python -m kbbot.cli "$@"
