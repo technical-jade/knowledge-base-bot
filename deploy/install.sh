@@ -66,8 +66,11 @@ echo "kb-build (pnpm $pnpm_ver)"
 
 step "Claude для kb-claude"
 install -d -o kb-claude -g kb-claude -m 700 /home/kb-claude/.claude
-# settings.json принадлежит root: Claude (Write) не может его переписать
+# settings.json принадлежит root и неизменяем (chattr +i): Write пишет через
+# временный файл + rename, и в своей папке kb-claude мог бы подменить файл целиком
+chattr -i /home/kb-claude/.claude/settings.json 2>/dev/null || true
 install -m 644 -o root -g root "$SRC/deploy/kb-claude-settings.json" /home/kb-claude/.claude/settings.json
+chattr +i /home/kb-claude/.claude/settings.json
 
 
 step "службы"

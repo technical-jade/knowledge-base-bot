@@ -13,7 +13,21 @@
       "Edit(//srv/kb/repo/CLAUDE.md)",
       "Write(//srv/kb/repo/.vitepress/**)",
       "Write(//srv/kb/repo/.git/**)",
-      "Write(//srv/kb/repo/CLAUDE.md)"
+      "Write(//srv/kb/repo/CLAUDE.md)",
+      "Edit(//tmp/**)",
+      "Edit(//var/**)",
+      "Edit(//run/**)",
+      "Edit(//dev/**)",
+      "Edit(//usr/**)",
+      "Edit(//home/**)",
+      "Edit(//etc/**)",
+      "Write(//tmp/**)",
+      "Write(//var/**)",
+      "Write(//run/**)",
+      "Write(//dev/**)",
+      "Write(//usr/**)",
+      "Write(//home/**)",
+      "Write(//etc/**)"
     ]
   },
   "includeCoAuthoredBy": false,
