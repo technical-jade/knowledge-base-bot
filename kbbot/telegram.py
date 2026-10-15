@@ -1,0 +1,157 @@
+"""Telegram-слой: aiogram 3, один разрешённый пользователь, Responder для Core."""
+
+import asyncio
+import logging
+import secrets
+import time
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Message
+
+from .access import AccessMiddleware
+from .core import Core
+from .store import Store
+from .tgformat import esc, plain_chunks, to_messages
+
+log = logging.getLogger("telegram")
+
+STATUS_EVERY = 3.0
+NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+
+# Ожидающие выбора кнопки: токен → future
+_choices: dict[str, asyncio.Future] = {}
+
+
+class TgResponder:
+    def __init__(self, bot: Bot, chat_id: int, store: Store) -> None:
+        self.bot = bot
+        self.chat_id = chat_id
+        self.store = store
+        self._status_id: int | None = None
+        self._status_text = ""
+        self._status_sent = 0.0
+        self._pending: asyncio.Task | None = None
+
+    async def send(self, md: str, article: str | None = None) -> int | None:
+        await self._drop_status()
+        last = None
+        for chunk in to_messages(md):
+            try:
+                msg = await self.bot.send_message(self.chat_id, chunk or "…", parse_mode="HTML", link_preview_options=NO_PREVIEW)
+            except TelegramBadRequest as e:
+                # Разметка не принята — повтор простым текстом
+                log.warning("html rejected", extra={"err": str(e)[:200]})
+                msg = None
+                for part in plain_chunks(md):
+                    msg = await self.bot.send_message(self.chat_id, part or "…", link_preview_options=NO_PREVIEW)
+                    if article:
+                        self.store.bind_message(msg.message_id, article)
+                last = msg.message_id if msg else last
+                break
+            last = msg.message_id
+            if article:
+                self.store.bind_message(msg.message_id, article)
+        return last
+
+    async def status(self, text: str) -> None:
+        self._status_text = text
+        if self._status_id is None:
+            try:
+                m = await self.bot.send_message(self.chat_id, f"⏳ {esc(text)}", parse_mode="HTML", disable_notification=True)
+                self._status_id = m.message_id
+                self._status_sent = time.monotonic()
+            except Exception:  # noqa: BLE001 — статус не критичен
+                log.exception("status send")
+            return
+        wait = STATUS_EVERY - (time.monotonic() - self._status_sent)
+        if wait <= 0 and not self._pending:
+            await self._edit_status()
+        elif not self._pending:
+            self._pending = asyncio.create_task(self._delayed(max(wait, 0)))
+
+    async def _delayed(self, wait: float) -> None:
+        await asyncio.sleep(wait)
+        self._pending = None
+        await self._edit_status()
+
+    async def _edit_status(self) -> None:
+        if self._status_id is None:
+            return
+        try:
+            await self.bot.edit_message_text(
+                f"⏳ {esc(self._status_text)}", chat_id=self.chat_id, message_id=self._status_id, parse_mode="HTML"
+            )
+        except TelegramRetryAfter as e:
+            self._status_sent = time.monotonic() + e.retry_after
+            return
+        except TelegramBadRequest:
+            pass  # «message is not modified»
+        self._status_sent = time.monotonic()
+
+    async def _drop_status(self) -> None:
+        if self._pending:
+            self._pending.cancel()
+            self._pending = None
+        if self._status_id is not None:
+            try:
+                await self.bot.delete_message(self.chat_id, self._status_id)
+            except TelegramBadRequest:
+                pass
+            self._status_id = None
+
+    async def done(self) -> None:
+        await self._drop_status()
+
+    async def choose(self, question: str, options: list[tuple[str, str]], default: str, timeout: int) -> str:
+        await self._drop_status()
+        token = secrets.token_hex(4)
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=f"ch:{token}:{key}")] for key, label in options]
+        )
+        labels = dict(options)
+        msg = await self.bot.send_message(self.chat_id, to_messages(question)[0], parse_mode="HTML", reply_markup=kb)
+        fut = asyncio.get_running_loop().create_future()
+        _choices[token] = fut
+        try:
+            key = await asyncio.wait_for(fut, timeout)
+            note = f"Выбрано: {labels.get(key, key)}"
+        except TimeoutError:
+            key = default
+            note = f"Время вышло — {labels.get(key, key)}"
+        finally:
+            _choices.pop(token, None)
+        try:
+            await self.bot.edit_message_text(
+                to_messages(question)[0] + f"\n\n<i>{esc(note)}</i>", chat_id=self.chat_id, message_id=msg.message_id, parse_mode="HTML"
+            )
+        except TelegramBadRequest:
+            pass
+        return key
+
+
+def build_dispatcher(core: Core, allowed_id: int) -> Dispatcher:
+    dp = Dispatcher()
+    dp.update.outer_middleware(AccessMiddleware(allowed_id))
+
+    @dp.callback_query(F.data.startswith("ch:"))
+    async def on_choice(cb: CallbackQuery) -> None:
+        _, token, key = (cb.data or "").split(":", 2)
+        fut = _choices.get(token)
+        if fut and not fut.done():
+            fut.set_result(key)
+            await cb.answer()
+        else:
+            await cb.answer("Этот выбор уже не актуален")
+
+    @dp.message(F.text)
+    async def on_text(msg: Message, bot: Bot) -> None:
+        resp = TgResponder(bot, msg.chat.id, core.store)
+        reply_to = msg.reply_to_message.message_id if msg.reply_to_message else None
+        await core.handle(msg.text or "", resp, reply_to)
+
+    @dp.message()
+    async def on_other(msg: Message) -> None:
+        await msg.answer("Я понимаю только текст. /help — что я умею.")
+
+    return dp

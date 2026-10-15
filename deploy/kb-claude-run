@@ -43,7 +43,8 @@ export DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_FEEDBAC
 unset TOKEN
 
 cd /srv/kb/repo
-exec "$HOME/.local/bin/claude" -p \
+# Страховка от зависания, если бот не смог остановить процесс (у бота — 20 мин)
+exec timeout --kill-after=30 1500 "$HOME/.local/bin/claude" -p \
     --model opus \
     --output-format stream-json --verbose \
     --tools "$TOOLS" \
