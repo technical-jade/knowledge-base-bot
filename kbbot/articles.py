@@ -77,3 +77,7 @@ def course_files(repo: Path, index_path: str) -> list[str]:
     """Все файлы учебника по пути его index.md."""
     d = (repo / index_path).parent
     return sorted(p.relative_to(repo).as_posix() for p in d.glob("*.md"))
+
+
+def title_of(repo: Path, path: str) -> str:
+    return str(_meta(repo / path).get("title") or Path(path).stem)

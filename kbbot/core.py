@@ -8,6 +8,7 @@ Telegram (telegram.py) и kb-bot-cli (cli.py) — лишь разные Responde
 import asyncio
 import fcntl
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -72,7 +73,7 @@ HELP = """**kb-bot** — пишет и правит статьи базы зна
 /ask <вопрос> — ответ по статьям базы
 /find <запрос> — найти статьи
 /list — разделы и статьи
-/delete <что> — удалить статью (с подтверждением)
+/delete <что> — удалить статью, учебник или раздел (с подтверждением)
 /undo — отменить последнее изменение бота
 /deploy — опубликовать ручные правки из git
 /reset — начать новый разговор
@@ -170,8 +171,14 @@ class Core:
                 return await self._run("find", resp, self.do_read(resp, "find", arg))
             if cmd == "/delete":
                 if not arg:
-                    return await self._say(resp, "Что удалить? `/delete статья про nginx`")
-                return await self._run("delete", resp, self.route_and_do(resp, f"Удали статью: {arg}", reply_to, force="delete"))
+                    cur = self.store.current_article
+                    return await self._say(
+                        resp,
+                        "Что удалить? Статью или раздел целиком:\n"
+                        "`/delete статья про nginx`\n`/delete раздел Frontend`\n`/delete учебник по Rust`"
+                        + (f"\n\nТекущая статья: `{cur}`" if cur else ""),
+                    )
+                return await self._run("delete", resp, self.route_and_do(resp, f"Удали: {arg}", reply_to, force="delete"))
             return await self._say(resp, "Не знаю такой команды. /help — что я умею.")
         await self._run("route", resp, self.route_and_do(resp, text, reply_to))
 
@@ -235,7 +242,7 @@ class Core:
         if force and it.intent != force:
             if force == "delete" and it.intent in ("edit", "find", "ask_kb", "chat"):
                 it = Intent("delete", {"target": it.args.get("target", "current")})
-        log.info("intent", extra={"intent": it.intent, "args": {k: v for k, v in it.args.items() if k != "instruction"}})
+        log.info("intent", extra={"intent": it.intent, "intent_args": {k: v for k, v in it.args.items() if k != "instruction"}})
         match it.intent:
             case "new":
                 return await self.do_new(resp, it.args)
@@ -409,19 +416,60 @@ class Core:
         out = await self.change(resp, prompt, resume=resume, article=path)
         return await self._report(resp, out)
 
-    async def do_delete(self, resp: Responder, target: str, reply_article: str | None):
-        path = self._resolve(target, reply_article)
+    def _delete_target(self, target: str | None, reply_article: str | None) -> tuple[str, str, list[str]] | None:
+        """(что удаляется — для вопроса, папка или файл, список файлов) или None.
+
+        Цель — статья (docs/…/x.md), раздел (docs/<раздел>/ или его index.md)
+        или учебник (docs/courses/<тема>/ или его index.md) — тогда папка целиком.
+        """
+        repo = self.cfg.paths.repo
+        secs = kb.sections(repo)
+        t = (target or "").strip()
+        if t in secs:  # роутер вернул просто имя папки
+            t = f"docs/{t}/"
+        folder = None
+        if t.endswith("/"):
+            folder = t.rstrip("/")
+        elif t.endswith("/index.md"):
+            folder = t.removesuffix("/index.md")
+        if folder:
+            parts = folder.split("/")
+            ok_section = len(parts) == 2 and parts[0] == "docs" and parts[1] in secs
+            ok_course = len(parts) == 3 and parts[:2] == ["docs", "courses"]
+            d = repo / folder
+            if not (ok_section or ok_course) or not d.is_dir() or not all(re.match(r"^[a-z0-9][a-z0-9-]*$", x) for x in parts[1:]):
+                return None
+            files = sorted(p.relative_to(repo).as_posix() for p in d.rglob("*") if p.is_file())
+            if ok_section:
+                n = len([f for f in files if f.endswith(".md") and f != f"{folder}/index.md"])
+                return f"раздел «{secs[parts[1]]}» (`{folder}/`) целиком — статей: {n}", folder + "/", files
+            title = kb.title_of(repo, f"{folder}/index.md")
+            return f"учебник «{title}» (`{folder}/`) целиком — файлов: {len(files)}", folder + "/", files
+        path = self._resolve(t or "current", reply_article)
         if not path:
-            raise TaskFailed("Не нашёл, какую статью удалить. Назовите её точнее или ответьте на сообщение со ссылкой.")
-        title = next((a.title for a in kb.articles(self.cfg.paths.repo) if a.path == path), path)
-        choice = await resp.choose(
-            f"Удалить статью «{title}» (`{path}`)?", [("yes", "Удалить"), ("no", "Отмена")], "no", 600,
-        )
+            return None
+        title = kb.title_of(repo, path)
+        return f"статью «{title}» (`{path}`)", path, [path]
+
+    async def do_delete(self, resp: Responder, target: str, reply_article: str | None):
+        found = self._delete_target(target, reply_article)
+        if not found:
+            raise TaskFailed(
+                "Не нашёл, что удалить. Назовите статью или раздел точнее "
+                "(`/delete раздел Frontend`) или ответьте на сообщение со ссылкой. /list — что есть."
+            )
+        what, where, files = found
+        choice = await resp.choose(f"Удалить {what}?", [("yes", "Удалить"), ("no", "Отмена")], "no", 600)
         if choice != "yes":
             await self._say(resp, "Хорошо, ничего не удаляю.")
             return "cancelled"
-        prompt = f"[delete]\nСтатья: {path}\nСегодня: {today()}"
-        out = await self.change(resp, prompt, resume=None, article=path, expect_delete=path)
+        listing = "\n".join(f"- {f}" for f in files)
+        prompt = (
+            f"[delete]\nУдаляется: {where}\nФайлы (удалит бот, сам их не трогай):\n{listing}\n"
+            "Найди ссылки на эти страницы в ОСТАЛЬНЫХ статьях и убери или замени их. "
+            f"Верни action \"deleted\" и files — этот же список.\nСегодня: {today()}"
+        )
+        out = await self.change(resp, prompt, resume=None, expect_delete=files)
         return await self._report(resp, out)
 
     async def _report(self, resp: Responder, out: Outcome) -> str:
@@ -465,7 +513,7 @@ class Core:
         resume: str | None,
         article: str | None = None,
         chat: bool = False,
-        expect_delete: str | None = None,
+        expect_delete: list[str] | None = None,
     ) -> Outcome:
         async with self.write_slot(resp):
             await resp.status("Обновляю репозиторий…")
@@ -528,17 +576,20 @@ class Core:
             self.store.rename_article(src, dst)
             wr.primary = dst
             wr.section = dst.split("/")[1]
-        elif wr.action == "deleted":
-            targets = wr.files
-            if expect_delete and expect_delete not in targets:
-                targets = [expect_delete, *targets]
+        elif expect_delete or wr.action == "deleted":
+            if not expect_delete:
+                raise TaskFailed("Claude предложил удалить файлы без запроса на удаление — отменено.")
+            # Удаляется ровно то, что подтвердил человек, — не список из ответа Claude
+            targets = expect_delete
             for t in targets:
                 if not (self.cfg.paths.repo / t).is_file():
                     raise TaskFailed(f"Удаление: файла `{t}` нет — отменено.")
             await asyncio.to_thread(self.repo.rm, targets)
             for t in targets:
                 self.store.forget_article(t)
-            note = "Удалены: " + ", ".join(f"`{t}`" for t in targets)
+            wr.action = "deleted"
+            shown = ", ".join(f"`{t}`" for t in targets[:10]) + (f" и ещё {len(targets) - 10}" if len(targets) > 10 else "")
+            note = f"Удалены: {shown}"
 
         changed = await asyncio.to_thread(self.repo.changed)
         if not changed:
@@ -579,6 +630,8 @@ class Core:
             raise TaskFailed(f"Коммит не удался: {e}") from None
         commit = await self._push_and_publish(resp)
 
+        if wr.action == "deleted" and (cur := self.store.current_article) and not (self.cfg.paths.repo / cur).exists():
+            self.store.current_article = None
         if wr.action != "deleted" and wr.primary:
             self.store.current_article = wr.primary
             if session:

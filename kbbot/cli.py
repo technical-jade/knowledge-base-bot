@@ -8,6 +8,7 @@
 
 import argparse
 import asyncio
+import logging
 import sys
 import time
 
@@ -70,7 +71,10 @@ async def main() -> int:
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return 2
-    setup_logging(cfg.bot_token) if "--debug" in sys.argv else None
+    # Логирование — как в службе (иначе ошибки логирования, роняющие бота,
+    # CLI не воспроизводит), но в stderr, чтобы не смешивать с ответами
+    setup_logging(cfg.bot_token)
+    logging.getLogger().handlers[0].setStream(sys.stderr)
     core = Core(cfg)
     if a.tasks:
         for row in core.store.tasks(30):

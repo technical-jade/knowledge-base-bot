@@ -342,3 +342,73 @@ def test_move_when_claude_copied_file_itself(env):
     assert r.sent[-1][0].startswith("Перенесено"), r.sent[-1][0]
     sh(seed, "pull", "-q")
     assert (seed / "docs/devops/old.md").exists() and not (seed / "docs/misc/old.md").exists()
+
+
+def test_routed_message_with_service_logging(env, capsys):
+    # В службе включено JSON-логирование: поле extra "args" роняло каждое сообщение
+    import logging
+
+    from kbbot.log import setup_logging
+    core, sc, *_ = env
+    setup_logging("1:x")
+    try:
+        sc(route={"intent": "chat", "args": {}}, read="ok")
+        r = run(core, "привет")
+        assert r.sent[-1][0] == "ok"
+    finally:
+        logging.getLogger().handlers[:] = []
+
+
+def test_delete_section_whole(env):
+    core, sc, calls, seed, _ = env
+    (core.cfg.paths.repo / "docs/devops/a.md").write_text(GOOD)
+    core.repo.commit("a")
+    deleted = result("deleted", "docs/devops/a.md", "Удаление: раздел DevOps")
+    sc(route={"intent": "delete", "args": {"target": "docs/devops/"}}, write=[{"files": {}, "result": deleted}])
+    r = run(core, "удали раздел devops", Resp(choice="yes"))
+    assert "раздел «DEVOPS»" in r.asked[0] and "статей: 1" in r.asked[0]
+    assert r.sent[-1][0].startswith("Удалено")
+    assert "docs/devops/a.md" in calls()[1]["prompt"] and "docs/devops/index.md" in calls()[1]["prompt"]
+    sh(seed, "pull", "-q")
+    assert not (seed / "docs/devops").exists() and (seed / "docs/misc/old.md").exists()
+
+
+def test_delete_course_by_index_path(env):
+    core, sc, calls, seed, _ = env
+    c = core.cfg.paths.repo / "docs/courses/rust"
+    c.mkdir(parents=True)
+    (core.cfg.paths.repo / "docs/courses/index.md").write_text("---\ntitle: Учебники\ndescription: d\n---\n")
+    for f in ("index.md", "01-a.md", "02-b.md"):
+        (c / f).write_text(GOOD)
+    core.repo.commit("course")
+    sc(route={"intent": "delete", "args": {"target": "docs/courses/rust/index.md"}},
+       write=[{"files": {}, "result": result("deleted", "docs/courses/rust/index.md", "Удаление: учебник")}])
+    r = run(core, "удали учебник по rust", Resp(choice="yes"))
+    assert "учебник" in r.asked[0] and "файлов: 3" in r.asked[0]
+    sh(seed, "pull", "-q")
+    assert not (seed / "docs/courses/rust").exists() and (seed / "docs/courses/index.md").exists()
+
+
+def test_delete_ignores_extra_files_from_claude(env):
+    core, sc, calls, seed, _ = env
+    sc(route={"intent": "delete", "args": {"target": "docs/misc/old.md"}},
+       write=[{"files": {}, "result": "```json\n" + json.dumps({"action": "deleted", "files": ["docs/misc/old.md", "docs/misc/index.md"], "summary": "Удаление"}) + "\n```"}])
+    run(core, "удали old", Resp(choice="yes"))
+    sh(seed, "pull", "-q")
+    assert not (seed / "docs/misc/old.md").exists() and (seed / "docs/misc/index.md").exists()
+
+
+def test_delete_unknown_section_or_root_refused(env):
+    core, sc, calls, *_ = env
+    for target in ("docs/", "docs/nope/", "docs/../etc/", "docs/index.md"):
+        sc(route={"intent": "delete", "args": {"target": target}}, write=[])
+        r = run(core, "удали", Resp(choice="yes"))
+        assert "Не нашёл, что удалить" in r.sent[-1][0], target
+    assert not [c for c in calls() if c["mode"] == "write"]
+
+
+def test_delete_command_without_arg_gives_hint(env):
+    core, sc, calls, *_ = env
+    sc(route={})
+    r = run(core, "/delete")
+    assert "раздел" in r.sent[-1][0] and calls() == []
