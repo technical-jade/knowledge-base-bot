@@ -39,12 +39,25 @@ def result(action="created", path="docs/devops/test.md", summary="Статья: 
 class Resp:
     def __init__(self, choice=None):
         self.sent, self.statuses, self.choice, self.asked = [], [], choice, []
+        self.buttons, self.edits, self.asks, self.stops = [], [], [], []
         self.n = 0
 
-    async def send(self, md, article=None):
+    async def send(self, md, article=None, buttons=None):
         self.n += 1
         self.sent.append((md, article))
+        self.buttons.append(buttons)
         return self.n
+
+    async def edit(self, message_id, md, buttons=None):
+        self.edits.append((message_id, md, buttons))
+
+    async def ask(self, md):
+        self.n += 1
+        self.asks.append(md)
+        return self.n
+
+    async def set_stop(self, action):
+        self.stops.append(action)
 
     async def status(self, text):
         self.statuses.append(text)
@@ -277,7 +290,8 @@ def test_list_and_help_without_claude(env):
     core, sc, calls, *_ = env
     sc(route={})
     r = run(core, "/list")
-    assert "Старая" in r.sent[-1][0] and "https://jade.tail2b43aa.ts.net/kb/misc/old.html" in r.sent[-1][0]
+    assert "База знаний" in r.sent[-1][0]
+    assert any(b.action == "sec:misc:0" for row in r.buttons[-1] for b in row)
     r = run(core, "/help")
     assert "/deploy" in r.sent[-1][0] and "Секреты" in r.sent[-1][0]
     assert calls() == []

@@ -18,7 +18,7 @@ from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from . import articles as kb
-from . import claude, mdcheck
+from . import claude, mdcheck, ui
 from .builder import build, publish_release
 from .config import Config
 from .gitops import ConflictError, GitError, Repo
@@ -72,7 +72,8 @@ HELP = """**kb-bot** — пишет и правит статьи базы зна
 /new <тема> — новая статья
 /ask <вопрос> — ответ по статьям базы
 /find <запрос> — найти статьи
-/list — разделы и статьи
+/list — разделы и статьи с кнопками
+/recent — последние изменения
 /delete <что> — удалить статью, учебник или раздел (с подтверждением)
 /undo — отменить последнее изменение бота
 /deploy — опубликовать ручные правки из git
@@ -85,7 +86,13 @@ HELP = """**kb-bot** — пишет и правит статьи базы зна
 
 
 class Responder(Protocol):
-    async def send(self, md: str, article: str | None = None) -> int | None: ...
+    async def send(self, md: str, article: str | None = None, buttons: list[list[ui.Btn]] | None = None) -> int | None: ...
+
+    async def edit(self, message_id: int | None, md: str, buttons: list[list[ui.Btn]] | None = None) -> None: ...
+
+    async def ask(self, md: str) -> int | None: ...
+
+    async def set_stop(self, action: str | None) -> None: ...
 
     async def status(self, text: str) -> None: ...
 
@@ -143,6 +150,8 @@ class Core:
         text = text.strip()
         if not text:
             return
+        if reply_to and not text.startswith("/") and (p := self.store.prompt(reply_to)):
+            return await self._prompt_reply(resp, p, text)
         if text.startswith("/"):
             cmd, _, arg = text.partition(" ")
             cmd = cmd.split("@", 1)[0].lower()
@@ -152,6 +161,7 @@ class Core:
                 "/help": self.cmd_help,
                 "/reset": self.cmd_reset,
                 "/list": self.cmd_list,
+                "/recent": self.cmd_recent,
                 "/deploy": self.cmd_deploy,
                 "/undo": self.cmd_undo,
             }
@@ -182,8 +192,97 @@ class Core:
             return await self._say(resp, "Не знаю такой команды. /help — что я умею.")
         await self._run("route", resp, self.route_and_do(resp, text, reply_to))
 
-    async def _say(self, resp: Responder, md: str, article: str | None = None) -> int | None:
-        return await resp.send(md, article)
+    async def _say(self, resp: Responder, md: str, article: str | None = None, buttons=None) -> int | None:
+        return await resp.send(md, article, buttons) if buttons else await resp.send(md, article)
+
+    # ---------- кнопки ----------
+
+    def _catalog(self) -> tuple[dict[str, str], dict[str, str], list[kb.Article]]:
+        repo = self.cfg.paths.repo
+        return kb.sections(repo), kb.icons(repo), kb.articles(repo)
+
+    def _home(self, note: str = "") -> ui.Screen:
+        secs, icons, arts = self._catalog()
+        sc = ui.home(self.cfg.site_url, secs, icons, arts)
+        return ui.Screen(note + sc.md, sc.buttons) if note else sc
+
+    def _article(self, ref: str, arts: list[kb.Article]) -> kb.Article | None:
+        try:
+            path = self.store.ref_path(int(ref))
+        except ValueError:
+            return None
+        return next((a for a in arts if a.path == path), None)
+
+    async def handle_action(self, action: str, resp: Responder, message_id: int | None) -> None:
+        """Нажатие кнопки: навигация — сразу и без Claude, действия — через _run."""
+        verb, _, rest = action.partition(":")
+        args = rest.split(":") if rest else []
+        secs, icons, arts = self._catalog()
+        site, ref = self.cfg.site_url, self.store.ref
+
+        async def show(sc: ui.Screen) -> None:
+            await resp.edit(message_id, sc.md, sc.buttons)
+
+        async def gone(what: str = "Статьи") -> None:
+            await show(self._home(f"⚠️ {what} уже нет — список обновлён.\n\n"))
+
+        art = self._article(args[-1], arts) if verb in ("card", "mv", "ed", "del") and args else None
+        if verb in ("q", "mvto") and len(args) >= 2:
+            art = self._article(args[1] if verb == "q" else args[0], arts)
+        match verb:
+            case "home":
+                await show(self._home())
+            case "recent":
+                commits = await asyncio.to_thread(self.repo.recent, 10)
+                await show(ui.recent(commits, arts, ref, self.cfg.git_email))
+            case "sec":
+                if not args or args[0] not in secs:
+                    return await gone("Раздела")
+                page = int(args[1]) if len(args) > 1 and args[1].isdigit() else 0
+                await show(ui.section(site, args[0], secs, icons, arts, page, ref))
+            case "card" | "mv" | "ed" | "del" | "q" | "mvto" if art is None:
+                await gone()
+            case "card":
+                chapters = kb.chapters(self.cfg.paths.repo, art.path) if ui.is_course(art) else None
+                await show(ui.card(site, art, secs, icons, ref, chapters))
+            case "mv":
+                await show(ui.move_targets(art, secs, icons, ref))
+            case "ed":
+                mid = await resp.ask(f"✏️ Что изменить в «{art.title}»? Напишите ответом на это сообщение.")
+                if mid is not None:
+                    self.store.bind_prompt(mid, "edit", art.path)
+            case "new":
+                if not args or args[0] not in secs:
+                    return await gone("Раздела")
+                mid = await resp.ask(f"➕ Тема новой статьи в «{secs[args[0]]}»? Напишите ответом на это сообщение.")
+                if mid is not None:
+                    self.store.bind_prompt(mid, "new", args[0])
+            case "q":
+                if args[0] not in ui.PRESETS:
+                    return
+                instr = ui.PRESETS[args[0]][1]
+                await self._run("edit", resp, self.do_edit(resp, {"target": art.path, "instruction": instr}, instr, None))
+            case "mvto":
+                if args[1] not in secs or args[1] == art.section:
+                    return await gone("Раздела")
+                text = f"Перенеси в раздел {args[1]}"
+                await self._run("edit", resp, self.do_edit(resp, {"target": art.path, "move_to": args[1], "instruction": text}, text, None))
+            case "del":
+                await self._run("delete", resp, self.do_delete(resp, art.path, None))
+            case "undo":
+                await self._run("/undo", resp, self.cmd_undo(resp))
+
+    async def _prompt_reply(self, resp: Responder, prompt: tuple[str, str], text: str) -> None:
+        """Ответ на ForceReply-подсказку: сразу действие, без маршрутизатора."""
+        kind, arg = prompt
+        if kind == "edit":
+            if not (self.cfg.paths.repo / arg).is_file():
+                return await self._say(resp, f"Статьи `{arg}` уже нет. /list — что есть.")
+            return await self._run("edit", resp, self.do_edit(resp, {"target": arg, "instruction": text}, text, None))
+        if kind == "new":
+            course = arg == "courses"
+            args = {"topic": text, "section": None if course else arg, "style": "course" if course else None}
+            return await self._run("new", resp, self.do_new(resp, args))
 
     async def _run(self, intent: str, resp: Responder, coro) -> None:
         task_id = self.store.task_start(intent)
@@ -282,7 +381,13 @@ class Core:
                 )
                 if uses_chat and res.session_id:
                     self.store.chat_session = res.session_id
-        await self._say(resp, res.text or "(пустой ответ)")
+        text_out = res.text or "(пустой ответ)"
+        buttons = None
+        if kind in ("find", "ask_kb"):
+            found = [a for a in kb.articles(self.cfg.paths.repo)
+                     if a.path in text_out or kb.url(self.cfg.site_url, a.path) in text_out]
+            buttons = ui.article_buttons(found, self.store.ref) or None
+        await self._say(resp, text_out, buttons=buttons)
         return kind
 
     # ---------- команды без Claude ----------
@@ -295,14 +400,13 @@ class Core:
         await self._say(resp, "Начинаем новый разговор.")
 
     async def cmd_list(self, resp: Responder):
-        secs = kb.sections(self.cfg.paths.repo)
-        items = kb.articles(self.cfg.paths.repo)
-        lines = [f"**База знаний** — {self.cfg.site_url}"]
-        for key, title in secs.items():
-            arts = [a for a in items if a.section == key]
-            lines.append(f"\n**{title}** ({len(arts)})")
-            lines += [f"• [{a.title}]({kb.url(self.cfg.site_url, a.path)})" for a in arts] or ["• —"]
-        await self._say(resp, "\n".join(lines))
+        sc = self._home()
+        await self._say(resp, sc.md, buttons=sc.buttons)
+
+    async def cmd_recent(self, resp: Responder):
+        commits = await asyncio.to_thread(self.repo.recent, 10)
+        sc = ui.recent(commits, kb.articles(self.cfg.paths.repo), self.store.ref, self.cfg.git_email)
+        await self._say(resp, sc.md, buttons=sc.buttons)
 
     async def cmd_deploy(self, resp: Responder):
         async with self.write_slot(resp):
@@ -476,14 +580,16 @@ class Core:
         secs = kb.sections(self.cfg.paths.repo)
         sec = secs.get(out.section or "", out.section or "")
         if out.action == "deleted":
-            await self._say(resp, f"Удалено. {out.note}".strip() + f"\n{self.cfg.site_url}")
+            buttons = ui.result_buttons(self.cfg.site_url, None, self.store.ref, deleted=True)
+            await self._say(resp, f"Удалено. {out.note}".strip() + f"\n{self.cfg.site_url}", buttons=buttons)
         else:
             link = kb.url(self.cfg.site_url, out.primary or "docs/index.md")
             verb = {"created": "Готово", "edited": "Обновлено", "moved": "Перенесено"}.get(out.action, "Готово")
             msg = f"{verb}: {link}" + (f" (раздел {sec})" if sec else "")
             if out.note:
                 msg += f"\n\n{out.note}"
-            await self._say(resp, msg, article=out.primary)
+            buttons = ui.result_buttons(self.cfg.site_url, out.primary, self.store.ref)
+            await self._say(resp, msg, article=out.primary, buttons=buttons)
         return out.commit or ""
 
     # ---------- конвейер изменения (ТЗ, раздел 6) ----------
