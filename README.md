@@ -71,6 +71,9 @@ kb-bot-cli "Чем HTTP/2 отличается от HTTP/3?"
 kb-bot-cli --choose dev "напиши гайд по Docker volumes"   # ответ на кнопки стиля
 kb-bot-cli --reply 1000000007 "сделай короче"              # правка «ответом» на сообщение CLI
 kb-bot-cli --choose yes /undo                               # подтверждение
+kb-bot-cli /list                                            # экран с кнопками: [метка код]
+kb-bot-cli --press sec:devops:0                             # нажать кнопку по коду
+kb-bot-cli --press stop:42                                  # остановить задачу 42
 kb-bot-cli --tasks                                          # журнал задач
 ```
 
