@@ -146,7 +146,7 @@ class Core:
             lock_path = self.cfg.paths.state / "write.lock"
             f = open(lock_path, "w")
             try:
-                await asyncio.to_thread(fcntl.flock, f, fcntl.LOCK_EX)
+                await _thread(fcntl.flock, f, fcntl.LOCK_EX)
                 yield
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
@@ -223,13 +223,19 @@ class Core:
 
     async def handle_action(self, action: str, resp: Responder, message_id: int | None) -> None:
         """Нажатие кнопки: навигация — сразу и без Claude, действия — через _run."""
+        if action.startswith("+"):
+            # Кнопка под ответом или результатом: экран — новым сообщением, ответ не затирается
+            action, message_id = action[1:], None
         verb, _, rest = action.partition(":")
         args = rest.split(":") if rest else []
         secs, icons, arts = self._catalog()
         site, ref = self.cfg.site_url, self.store.ref
 
         async def show(sc: ui.Screen) -> None:
-            await resp.edit(message_id, sc.md, sc.buttons)
+            if message_id is None:
+                await self._say(resp, sc.md, buttons=sc.buttons)
+            else:
+                await resp.edit(message_id, sc.md, sc.buttons)
 
         async def gone(what: str = "Статьи") -> None:
             await show(self._home(f"⚠️ {what} уже нет — список обновлён.\n\n"))
@@ -241,7 +247,7 @@ class Core:
             case "home":
                 await show(self._home())
             case "recent":
-                commits = await asyncio.to_thread(self.repo.recent, 10)
+                commits = await _thread(self.repo.recent, 10)
                 await show(ui.recent(commits, arts, ref, self.cfg.git_email))
             case "sec":
                 if not args or args[0] not in secs:
@@ -283,12 +289,18 @@ class Core:
                 why = self.stop(int(args[0])) if args and args[0].isdigit() else "Задача уже завершена."
                 if why:
                     await self._say(resp, why)
+                else:
+                    # Кнопка была на статусе задачи — сразу показываем, что нажатие принято
+                    await resp.edit(message_id, "⏳ Останавливаю…")
 
     def stop(self, task_id: int) -> str | None:
         """Остановить задачу. None — остановлена (итог сообщит сама задача), иначе — почему нет."""
         task = self._running.get(task_id)
         if task is None or task.done():
             return "Задача уже завершена."
+        if task_id in self._stopped:
+            # Повторная отмена прервала бы завершение процесса и откат
+            return "Останавливаю, подождите…"
         if task_id in self._critical:
             return "Уже публикуется — остановить нельзя. Отменить изменение можно кнопкой ↩️ после публикации."
         self._stopped.add(task_id)
@@ -446,7 +458,7 @@ class Core:
         await self._say(resp, sc.md, buttons=sc.buttons)
 
     async def cmd_recent(self, resp: Responder):
-        commits = await asyncio.to_thread(self.repo.recent, 10)
+        commits = await _thread(self.repo.recent, 10)
         sc = ui.recent(commits, kb.articles(self.cfg.paths.repo), self.store.ref, self.cfg.git_email)
         await self._say(resp, sc.md, buttons=sc.buttons)
 
@@ -454,7 +466,7 @@ class Core:
         async with self.write_slot(resp):
             await resp.status("Забираю изменения из git…")
             await self._pull()
-            await asyncio.to_thread(self.repo.rollback)
+            await _thread(self.repo.rollback)
             files = [p.relative_to(self.cfg.paths.repo).as_posix() for p in (self.cfg.paths.repo / "docs").rglob("*.md")]
             problems = mdcheck.check_files(self.cfg.paths.repo, files)
             if problems:
@@ -488,7 +500,7 @@ class Core:
                 return "cancelled"
             await self._critical_phase(resp)
             await resp.status("Отменяю…")
-            await asyncio.to_thread(self.repo.revert_last, f"Отмена: {subject}")
+            await _thread(self.repo.revert_last, f"Отмена: {subject}")
             await self._build_or_fail(resp, rollback_to_origin=True)
             commit = await self._push_and_publish(resp)
         await self._say(resp, f"Отменено: «{subject}» (коммит `{commit}`). {self.cfg.site_url}")
@@ -640,7 +652,7 @@ class Core:
 
     async def _pull(self) -> None:
         try:
-            await asyncio.to_thread(self.repo.pull_ff)
+            await _thread(self.repo.pull_ff)
         except GitError as e:
             raise TaskFailed(f"`git pull` не прошёл — задачу не начинаю:\n```\n{str(e)[-800:]}\n```") from None
 
@@ -650,10 +662,10 @@ class Core:
         )
 
     async def _guard(self) -> None:
-        outside = await asyncio.to_thread(self.repo.outside_docs)
+        outside = await _thread(self.repo.outside_docs)
         if outside:
             log.error("boundary violation", extra={"paths": outside})
-            await asyncio.to_thread(self.repo.rollback)
+            await _thread(self.repo.rollback)
             raise TaskFailed(f"⛔ Изменения вне docs/ ({', '.join(outside[:5])}) — всё отменено.")
 
     async def change(
@@ -666,18 +678,22 @@ class Core:
         expect_delete: list[str] | None = None,
     ) -> Outcome:
         async with self.write_slot(resp):
-            await resp.status("Обновляю репозиторий…")
-            await self._pull()
-            await asyncio.to_thread(self.repo.rollback)
             if resume:
                 # В продолжаемой сессии могли остаться «воспоминания» о попытке,
                 # которую бот откатил, — найдено фактом: Claude отвечал «уже написал»
                 prompt = RESUME_NOTE + prompt
             try:
+                await resp.status("Обновляю репозиторий…")
+                await self._pull()
+                await _thread(self.repo.rollback)
                 return await self._change_locked(resp, prompt, resume, article, chat, expect_delete)
             except BaseException:
-                # Любой сбой до коммита — рабочая копия возвращается к HEAD
-                await asyncio.to_thread(self.repo.rollback)
+                # Любой сбой до коммита — рабочая копия возвращается к HEAD;
+                # ошибка самого отката не должна подменять исходную (например, остановку)
+                try:
+                    await _thread(self.repo.rollback)
+                except Exception:  # noqa: BLE001
+                    log.exception("rollback failed")
                 raise
 
     async def _change_locked(self, resp, prompt, resume, article, chat, expect_delete) -> Outcome:
@@ -705,14 +721,14 @@ class Core:
             src, dst = wr.src, wr.dst
             if not (self.cfg.paths.repo / src).is_file():
                 raise TaskFailed(f"Перенос: файла `{src}` нет — отменено.")
-            dst_new = dst in await asyncio.to_thread(self.repo.untracked)
+            dst_new = dst in await _thread(self.repo.untracked)
             if (self.cfg.paths.repo / dst).exists() and not dst_new:
                 raise TaskFailed(f"Перенос: `{dst}` уже существует — отменено.")
             if dst_new:
                 # Claude сам записал копию в новый раздел — оставляем её, старый файл удаляем
-                await asyncio.to_thread(self.repo.rm, [src])
+                await _thread(self.repo.rm, [src])
             else:
-                await asyncio.to_thread(self.repo.mv, src, dst)
+                await _thread(self.repo.mv, src, dst)
             await resp.status("Правлю ссылки…")
             res = await self._claude_write(
                 resp,
@@ -734,20 +750,20 @@ class Core:
             for t in targets:
                 if not (self.cfg.paths.repo / t).is_file():
                     raise TaskFailed(f"Удаление: файла `{t}` нет — отменено.")
-            await asyncio.to_thread(self.repo.rm, targets)
+            await _thread(self.repo.rm, targets)
             for t in targets:
                 self.store.forget_article(t)
             wr.action = "deleted"
             shown = ", ".join(f"`{t}`" for t in targets[:10]) + (f" и ещё {len(targets) - 10}" if len(targets) > 10 else "")
             note = f"Удалены: {shown}"
 
-        changed = await asyncio.to_thread(self.repo.changed)
+        changed = await _thread(self.repo.changed)
         if not changed:
             raise TaskFailed("Claude ничего не изменил.\n\n" + (res.text or "")[:1500])
 
         # Проверка Markdown и сборка; ошибки — Claude в той же сессии, до 2 попыток
         for attempt in range(FIX_ATTEMPTS + 1):
-            changed = await asyncio.to_thread(self.repo.changed)
+            changed = await _thread(self.repo.changed)
             problems = mdcheck.check_files(self.cfg.paths.repo, changed)
             if problems:
                 if attempt == FIX_ATTEMPTS:
@@ -776,7 +792,7 @@ class Core:
         await self._critical_phase(resp)
         await resp.status("Публикую…")
         try:
-            await asyncio.to_thread(self.repo.commit, summary)
+            await _thread(self.repo.commit, summary)
         except GitError as e:
             raise TaskFailed(f"Коммит не удался: {e}") from None
         commit = await self._push_and_publish(resp)
@@ -796,12 +812,12 @@ class Core:
         b = await build(self.cfg)
         if not b.ok:
             if rollback_to_origin:
-                await asyncio.to_thread(self.repo.reset_to_origin)
+                await _thread(self.repo.reset_to_origin)
             raise TaskFailed(f"Сборка не прошла:\n\n```\n{b.log_tail[-2500:]}\n```")
 
     async def _push_and_publish(self, resp: Responder) -> str:
         try:
-            foreign = await asyncio.to_thread(self.repo.sync_and_push, self.cfg.paths.conflicts)
+            foreign = await _thread(self.repo.sync_and_push, self.cfg.paths.conflicts)
         except ConflictError as e:
             raise TaskFailed(
                 "⚠️ Конфликт с изменениями в GitHub — ничего не опубликовано, репозиторий возвращён к origin.\n"
@@ -809,7 +825,7 @@ class Core:
                 f"Мои изменения сохранены патчем: `{e.patch}`"
             ) from None
         except GitError as e:
-            await asyncio.to_thread(self.repo.reset_to_origin)
+            await _thread(self.repo.reset_to_origin)
             raise TaskFailed(f"push не удался, изменения отменены:\n```\n{str(e)[-800:]}\n```") from None
         if foreign:
             # Пришли чужие коммиты — собранный сайт их не содержит
@@ -842,6 +858,18 @@ def _prune_conflicts(d: Path) -> None:
 
 def _problems_md(problems) -> str:
     return "\n".join(f"• `{p}`" for p in problems[:20])
+
+
+async def _thread(fn, *args):
+    """to_thread, переживающий остановку: поток (git, flock) доводится до конца,
+    и только потом отмена идёт дальше — иначе замок записи освободился бы при
+    работающем git."""
+    fut = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    try:
+        return await asyncio.shield(fut)
+    except asyncio.CancelledError:
+        await asyncio.wait([fut])
+        raise
 
 
 @asynccontextmanager

@@ -107,7 +107,7 @@ def test_delete_button_confirms(env):
     sc(write=[{"files": {}, "result": result("deleted", OLD, "Удаление: Старая")}])
     r = press(core, f"del:{core.store.ref(OLD)}", Resp(choice="yes"))
     assert r.asked and r.sent[-1][0].startswith("Удалено")
-    assert acts(r.buttons[-1]) == ["undo", "home"]
+    assert acts(r.buttons[-1]) == ["undo", "+home"]
     sh(seed, "pull", "-q")
     assert not (seed / OLD).exists()
 
@@ -131,7 +131,7 @@ def test_find_answer_gets_card_buttons(env):
     core, sc, calls, *_ = env
     sc(read=f"Нашёл: [Старая](https://jade.tail2b43aa.ts.net/kb/misc/old.html)")
     r = run(core, "/find старое")
-    assert acts(r.buttons[-1]) == [f"card:{core.store.ref(OLD)}"]
+    assert acts(r.buttons[-1]) == [f"+card:{core.store.ref(OLD)}"]
 
 
 # ---------- остановка ----------
@@ -224,3 +224,96 @@ def test_build_cancel_terminates_process(env):
     asyncio.run(go())
     out = os.popen("pgrep -f '^[^ ]*python[^ ]* -c import time; time.sleep'").read().split()
     assert not out
+
+
+# ---------- после ревью ----------
+
+
+def test_plus_actions_open_new_message(env):
+    core, *_ = env
+    r = press(core, f"+card:{core.store.ref(OLD)}")
+    assert not r.edits and "Старая" in r.sent[-1][0]
+
+
+def test_second_stop_press_does_not_recancel(env):
+    core, *_ = env
+
+    async def go():
+        t = asyncio.create_task(asyncio.sleep(5))
+        core._running[8] = t
+        assert core.stop(8) is None
+        again = core.stop(8)
+        n = t.cancelling()
+        t.cancel()
+        return again, n
+
+    again, n = asyncio.run(go())
+    assert "Останавлива" in again and n == 1
+
+
+def test_stop_gives_immediate_feedback(env):
+    core, *_ = env
+
+    async def go():
+        t = asyncio.create_task(asyncio.sleep(5))
+        core._running[9] = t
+        r = Resp()
+        await core.handle_action("stop:9", r, 77)
+        t.cancel()
+        return r
+
+    r = asyncio.run(go())
+    assert r.edits[-1][0] == 77 and "Останавливаю" in r.edits[-1][1] and not r.edits[-1][2]
+
+
+def test_stop_during_git_thread_waits_for_it(env, monkeypatch):
+    core, sc, calls, *_ = env
+    import time as _time
+    state = {}
+    real_pull = core.repo.pull_ff
+
+    def slow_pull():
+        state["started"] = True
+        _time.sleep(1.0)
+        real_pull()
+        state["done"] = _time.monotonic()
+
+    monkeypatch.setattr(core.repo, "pull_ff", slow_pull)
+    resp = Resp()
+
+    async def go():
+        job = asyncio.create_task(core.handle_action(f"q:short:{core.store.ref(OLD)}", resp, 5))
+        while not state.get("started"):
+            await asyncio.sleep(0.02)
+        core.stop(next(iter(core._running)))
+        await job
+        return _time.monotonic()
+
+    ended = asyncio.run(go())
+    assert "done" in state and state["done"] <= ended  # поток git завершён до освобождения замка
+    assert resp.sent[-1][0].startswith("✖️ Остановлено")
+    assert calls() == []
+
+
+def test_rollback_error_does_not_mask_stop(env, monkeypatch):
+    core, sc, calls, *_ = env
+    from kbbot.gitops import GitError
+    sc(sleep=60, write=[{"files": {OLD: "x"}, "result": result("edited", OLD)}])
+    pidfile = core.cfg.claude_cmd[-1].replace(".json", ".pid")
+    resp = Resp()
+
+    async def go():
+        job = asyncio.create_task(core.handle_action(f"q:short:{core.store.ref(OLD)}", resp, 5))
+        while not os.path.exists(pidfile):
+            await asyncio.sleep(0.05)
+
+        def broken():
+            raise GitError("index.lock")
+
+        monkeypatch.setattr(core.repo, "rollback", broken)
+        core.stop(next(iter(core._running)))
+        await job
+
+    asyncio.run(go())
+    assert resp.sent[-1][0].startswith("✖️ Остановлено")
+    assert core.store.tasks(1)[0][3] == "stopped"

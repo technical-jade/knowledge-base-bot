@@ -6,6 +6,7 @@ ASCII-строки ≤ 64 байт (лимит callback_data): статьи — 
 Store.ref, не по пути.
 """
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -24,6 +25,14 @@ PRESETS = {
 }
 
 Ref = Callable[[str], int]
+
+# Папка раздела попадает в callback_data как есть; кириллица или длинное имя
+# (папку можно создать вручную) сломали бы всё сообщение — такие не кликаются
+_SAFE_KEY = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+
+
+def safe_key(key: str) -> bool:
+    return bool(_SAFE_KEY.match(key))
 
 
 @dataclass(frozen=True)
@@ -63,7 +72,8 @@ def _grid(btns: list[Btn], per_row: int = 2) -> list[list[Btn]]:
 
 def home(site: str, secs: dict[str, str], icons: dict[str, str], arts: list[Article]) -> Screen:
     count = {k: len([a for a in arts if a.section == k]) for k in secs}
-    btns = [Btn(short(f"{icons.get(k, '📁')} {t} ({count[k]})", LABEL + 2), f"sec:{k}:0") for k, t in secs.items()]
+    btns = [Btn(short(f"{icons.get(k, '📁')} {t} ({count[k]})", LABEL + 2), f"sec:{k}:0" if safe_key(k) else "noop")
+            for k, t in secs.items()]
     md = f"📚 **База знаний** — {_articles_word(len(arts))}\n{site}"
     return Screen(md, _grid(btns) + [[Btn("🕘 Недавние", "recent")]])
 
@@ -115,7 +125,8 @@ def card(site: str, a: Article, secs: dict[str, str], icons: dict[str, str], ref
 
 def move_targets(a: Article, secs: dict[str, str], icons: dict[str, str], ref: Ref) -> Screen:
     r = ref(a.path)
-    btns = [Btn(short(f"{icons.get(k, '📁')} {t}"), f"mvto:{r}:{k}") for k, t in secs.items() if k not in (a.section, "courses")]
+    btns = [Btn(short(f"{icons.get(k, '📁')} {t}"), f"mvto:{r}:{k}") for k, t in secs.items()
+            if k not in (a.section, "courses") and safe_key(k)]
     md = f"🔀 Куда перенести «{a.title}»?" + ("" if btns else "\n\nДругих разделов нет.")
     return Screen(md, _grid(btns) + [[Btn("⬅️ Назад", f"card:{r}")]])
 
@@ -153,14 +164,14 @@ def recent(commits: list[Commit], arts: list[Article], ref: Ref, bot_email: str)
 def result_buttons(site: str, path: str | None, ref: Ref, deleted: bool = False) -> list[list[Btn]]:
     """Кнопки под «Готово/Обновлено/Перенесено/Удалено»."""
     if deleted or not path:
-        return [[Btn("↩️ Отменить", "undo"), Btn("📚 Список", "home")]]
+        return [[Btn("↩️ Отменить", "undo"), Btn("📚 Список", "+home")]]
     r = ref(path)
     first = [Btn("🌐 Открыть", url=url(site, path)), Btn("✏️", f"ed:{r}")]
     if not path.startswith("docs/courses/"):
-        first.append(Btn("🔀", f"mv:{r}"))
+        first.append(Btn("🔀", f"+mv:{r}"))
     return [first, [Btn("↩️ Отменить", "undo"), Btn("🗑", f"del:{r}")]]
 
 
 def article_buttons(arts: list[Article], ref: Ref) -> list[list[Btn]]:
-    """Кнопки карточек под ответом /find (до 8)."""
-    return [[Btn(short(f"📄 {a.title}"), f"card:{ref(a.path)}")] for a in arts[:8]]
+    """Кнопки карточек под ответом /find (до 8); «+» — экран новым сообщением."""
+    return [[Btn(short(f"📄 {a.title}"), f"+card:{ref(a.path)}")] for a in arts[:8]]

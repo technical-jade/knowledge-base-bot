@@ -179,8 +179,22 @@ def test_result_buttons():
     r = ref("docs/devops/x.md")
     rows = ui.result_buttons(SITE, "docs/devops/x.md", ref)
     assert rows[0][0].url == SITE + "devops/x.html"
-    assert [b.action for row in rows for b in row if b.action] == [f"ed:{r}", f"mv:{r}", "undo", f"del:{r}"]
-    assert [b.action for row in ui.result_buttons(SITE, None, ref, deleted=True) for b in row] == ["undo", "home"]
+    assert [b.action for row in rows for b in row if b.action] == [f"ed:{r}", f"+mv:{r}", "undo", f"del:{r}"]
+    assert [b.action for row in ui.result_buttons(SITE, None, ref, deleted=True) for b in row] == ["undo", "+home"]
+
+
+def test_article_buttons_open_new_message():
+    a = Article("docs/devops/x.md", "X", "devops")
+    assert [b.action for row in ui.article_buttons([a], ref) for b in row] == [f"+card:{ref(a.path)}"]
+
+
+def test_unsafe_section_key_not_in_callback():
+    secs = {"devops": "DevOps", "моё": "Моё", "x" * 60: "Длинный"}
+    s = ui.home(SITE, secs, {}, [])
+    acts_ = [b.action for row in s.buttons for b in row]
+    assert acts_ == ["sec:devops:0", "noop", "noop", "recent"]
+    m = ui.move_targets(Article("docs/devops/x.md", "X", "devops"), secs, {}, ref)
+    assert [b.action for row in m.buttons for b in row] == [f"card:{ref('docs/devops/x.md')}"]
 
 
 def test_short_title():
