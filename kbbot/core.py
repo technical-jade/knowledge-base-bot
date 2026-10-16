@@ -11,6 +11,7 @@ import logging
 import re
 import time
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +36,9 @@ STYLES = [
     ("course", "Учебник из глав"),
 ]
 STYLE_NAMES = dict(STYLES)
+
+# id задачи журнала в контексте её корутины — для «критической» фазы
+_task_id: ContextVar[int | None] = ContextVar("task_id", default=None)
 FIX_ATTEMPTS = 2
 
 RESUME_NOTE = (
@@ -126,6 +130,10 @@ class Core:
         self._write = asyncio.Lock()
         self._read = asyncio.Semaphore(2)
         self._chat = asyncio.Lock()
+        # Остановка задач кнопкой: запущенные, остановленные, в фазе публикации
+        self._running: dict[int, asyncio.Task] = {}
+        self._stopped: set[int] = set()
+        self._critical: set[int] = set()
 
     # ---------- очередь ----------
 
@@ -271,6 +279,27 @@ class Core:
                 await self._run("delete", resp, self.do_delete(resp, art.path, None))
             case "undo":
                 await self._run("/undo", resp, self.cmd_undo(resp))
+            case "stop":
+                why = self.stop(int(args[0])) if args and args[0].isdigit() else "Задача уже завершена."
+                if why:
+                    await self._say(resp, why)
+
+    def stop(self, task_id: int) -> str | None:
+        """Остановить задачу. None — остановлена (итог сообщит сама задача), иначе — почему нет."""
+        task = self._running.get(task_id)
+        if task is None or task.done():
+            return "Задача уже завершена."
+        if task_id in self._critical:
+            return "Уже публикуется — остановить нельзя. Отменить изменение можно кнопкой ↩️ после публикации."
+        self._stopped.add(task_id)
+        task.cancel()
+        return None
+
+    async def _critical_phase(self, resp: Responder) -> None:
+        """С этого места задача не останавливается: коммит, push, публикация."""
+        if (tid := _task_id.get()) is not None:
+            self._critical.add(tid)
+        await resp.set_stop(None)
 
     async def _prompt_reply(self, resp: Responder, prompt: tuple[str, str], text: str) -> None:
         """Ответ на ForceReply-подсказку: сразу действие, без маршрутизатора."""
@@ -286,9 +315,19 @@ class Core:
 
     async def _run(self, intent: str, resp: Responder, coro) -> None:
         task_id = self.store.task_start(intent)
+        token = _task_id.set(task_id)
+        task = asyncio.ensure_future(coro)  # копирует контекст с task_id
+        _task_id.reset(token)
+        self._running[task_id] = task
+        await resp.set_stop(f"stop:{task_id}")
         try:
-            detail = await coro
+            detail = await task
             self.store.task_finish(task_id, "ok", str(detail or ""))
+        except asyncio.CancelledError:
+            if task_id not in self._stopped:
+                raise  # остановка службы, а не кнопка
+            self.store.task_finish(task_id, "stopped")
+            await self._say(resp, "✖️ Остановлено, изменения отменены.")
         except claude.ClaudeAuthError as e:
             log.error("claude auth", extra={"err": str(e)[:300]})
             self.store.task_finish(task_id, "auth", str(e))
@@ -304,6 +343,9 @@ class Core:
             self.store.task_finish(task_id, "error", repr(e))
             await self._say(resp, f"❌ Ошибка: `{type(e).__name__}: {str(e)[:300]}`")
         finally:
+            self._running.pop(task_id, None)
+            self._stopped.discard(task_id)
+            self._critical.discard(task_id)
             await resp.done()
             self.store.prune()
             _prune_conflicts(self.cfg.paths.conflicts)
@@ -421,6 +463,7 @@ class Core:
             b = await build(self.cfg)
             if not b.ok:
                 raise TaskFailed(f"Сборка упала, сайт не обновлён:\n\n```\n{b.log_tail[-2500:]}\n```")
+            await self._critical_phase(resp)
             await resp.status("Публикую…")
             sha = self.repo.head()
             rel = await publish_release(self.cfg, sha)
@@ -443,6 +486,7 @@ class Core:
             if choice != "yes":
                 await self._say(resp, "Хорошо, ничего не меняю.")
                 return "cancelled"
+            await self._critical_phase(resp)
             await resp.status("Отменяю…")
             await asyncio.to_thread(self.repo.revert_last, f"Отмена: {subject}")
             await self._build_or_fail(resp, rollback_to_origin=True)
@@ -729,6 +773,7 @@ class Core:
             await self._guard()
 
         summary = wr.summary or f"Статья: {wr.primary}"
+        await self._critical_phase(resp)
         await resp.status("Публикую…")
         try:
             await asyncio.to_thread(self.repo.commit, summary)

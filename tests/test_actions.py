@@ -132,3 +132,95 @@ def test_find_answer_gets_card_buttons(env):
     sc(read=f"Нашёл: [Старая](https://jade.tail2b43aa.ts.net/kb/misc/old.html)")
     r = run(core, "/find старое")
     assert acts(r.buttons[-1]) == [f"card:{core.store.ref(OLD)}"]
+
+
+# ---------- остановка ----------
+
+import dataclasses  # noqa: E402
+import os  # noqa: E402
+import sys  # noqa: E402
+
+import pytest  # noqa: E402
+
+from kbbot.builder import build  # noqa: E402
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_stop_running_task_kills_claude_and_rolls_back(env):
+    core, sc, calls, *_ = env
+    sc(sleep=60, write=[{"files": {OLD: "испорчено"}, "result": result("edited", OLD)}])
+    pidfile = core.cfg.claude_cmd[-1].replace(".json", ".pid")
+    resp, other = Resp(), Resp()
+
+    async def go():
+        job = asyncio.create_task(core.handle_action(f"q:short:{core.store.ref(OLD)}", resp, 5))
+        for _ in range(200):
+            if os.path.exists(pidfile):
+                break
+            await asyncio.sleep(0.05)
+        stop = next(a for a in resp.stops if a)
+        await core.handle_action(stop, other, 6)
+        await asyncio.wait_for(job, 20)
+        return int(open(pidfile).read())
+
+    pid = asyncio.run(go())
+    assert resp.sent[-1][0].startswith("✖️ Остановлено")
+    assert not other.sent  # успешная остановка — итог сообщает сама задача
+    assert core.repo.changed() == []
+    assert (core.cfg.paths.repo / OLD).read_text() != "испорчено"
+    assert core.store.tasks(1)[0][3] == "stopped"
+    assert not _alive(pid)
+
+
+def test_stop_finished_task(env):
+    core, *_ = env
+    r = press(core, "stop:9999")
+    assert "уже завершена" in r.sent[-1][0]
+
+
+def test_stop_refused_in_critical_phase(env):
+    core, *_ = env
+
+    async def go():
+        dummy = asyncio.create_task(asyncio.sleep(5))
+        core._running[7] = dummy
+        core._critical.add(7)
+        r = Resp()
+        await core.handle_action("stop:7", r, 1)
+        cancelled = dummy.cancelled()
+        dummy.cancel()
+        return r, cancelled
+
+    r, cancelled = asyncio.run(go())
+    assert "Уже публикуется" in r.sent[-1][0] and not cancelled
+
+
+def test_pipeline_drops_stop_button_before_commit(env):
+    core, sc, calls, *_ = env
+    sc(write=[{"files": {OLD: GOOD.replace("Тест", "Старая") + "\nx\n"}, "result": result("edited", OLD)}])
+    r = press(core, f"q:short:{core.store.ref(OLD)}")
+    assert r.sent[-1][0].startswith("Обновлено")
+    assert r.stops[0].startswith("stop:") and None in r.stops
+
+
+def test_build_cancel_terminates_process(env):
+    core, *_ = env
+    cfg = dataclasses.replace(core.cfg, build_cmd=[sys.executable, "-c", "import time; time.sleep(60)"])
+
+    async def go():
+        t = asyncio.create_task(build(cfg))
+        await asyncio.sleep(1)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+
+    asyncio.run(go())
+    out = os.popen("pgrep -f '^[^ ]*python[^ ]* -c import time; time.sleep'").read().split()
+    assert not out

@@ -126,6 +126,10 @@ async def run(
     except TimeoutError:
         await _kill(proc)
         raise ClaudeTimeout(f"Claude не уложился в {timeout // 60} мин") from None
+    except asyncio.CancelledError:
+        # Кнопка «Остановить» — процесс не должен продолжать писать в репозиторий
+        await _kill(proc)
+        raise
     finally:
         await asyncio.wait_for(err_task, 5) if not err_task.done() else None
 

@@ -1,12 +1,15 @@
 """Поддельный kb-claude-run для тестов: argv = <scenario.json> <mode> [--resume id].
 
-scenario.json: {"route": {...intent json...}, "write": [шаг, ...], "read": "текст"}
+scenario.json: {"route": {...intent json...}, "write": [шаг, ...], "read": "текст", "sleep": сек}
+"sleep" — пауза перед итогом (проверка остановки); pid процесса — в <scenario>.pid.
 Шаг write: {"files": {"docs/x.md": "содержимое"}, "result": "текст ответа"}.
 Шаги выполняются по очереди (номер хранится рядом со сценарием).
 Рабочая папка — репозиторий (cwd).
 """
 import json
+import os
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -44,4 +47,6 @@ else:
         emit({"type": "assistant", "session_id": sid, "message": {"content": [
             {"type": "tool_use", "name": "Write", "input": {"file_path": str(p)}}]}})
     text = step["result"]
+scenario_path.with_suffix(".pid").write_text(str(os.getpid()))
+time.sleep(sc.get("sleep", 0))
 emit({"type": "result", "subtype": "success", "is_error": False, "result": text, "session_id": sid, "total_cost_usd": 0.01})

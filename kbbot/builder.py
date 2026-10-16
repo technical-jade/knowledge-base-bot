@@ -28,6 +28,11 @@ async def build(cfg: Config) -> BuildResult:
         proc.terminate()
         await proc.wait()
         return BuildResult(False, "сборка не уложилась в 15 минут")
+    except asyncio.CancelledError:
+        # Остановленная задача не оставляет сборку, пишущую в build-out
+        proc.terminate()
+        await proc.wait()
+        raise
     text = out.decode(errors="replace")
     # Цветовые коды vitepress в журнале не нужны
     text = "".join(ch for ch in text if ch == "\n" or ch >= " ").replace("[32m", "").replace("[31m", "").replace("[39m", "")
