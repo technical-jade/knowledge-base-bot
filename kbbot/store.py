@@ -1,7 +1,7 @@
 """Состояние бота в SQLite (ТЗ, раздел 9).
 
 Сессия чата, текущая статья, статья → сессия Claude, message_id → статья,
-журнал задач. Секретов здесь нет — только пути, id и короткие итоги.
+номера статей для кнопок, ForceReply-подсказки, журнал задач. Секретов здесь нет — только пути, id и короткие итоги.
 """
 
 import sqlite3
@@ -33,6 +33,16 @@ CREATE TABLE IF NOT EXISTS tasks (
     detail TEXT,
     commit_sha TEXT,
     duration REAL
+);
+CREATE TABLE IF NOT EXISTS refs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT UNIQUE NOT NULL
+);
+CREATE TABLE IF NOT EXISTS prompts (
+    message_id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,
+    arg TEXT NOT NULL,
+    created REAL NOT NULL
 );
 """
 
@@ -103,6 +113,9 @@ class Store:
         self._exec("DELETE FROM article_sessions WHERE path = ?", (new,))
         self._exec("UPDATE article_sessions SET path = ? WHERE path = ?", (new, old))
         self._exec("UPDATE messages SET path = ? WHERE path = ?", (new, old))
+        # Номер статьи для кнопок переезжает вместе с ней
+        self._exec("DELETE FROM refs WHERE path = ? AND EXISTS (SELECT 1 FROM refs WHERE path = ?)", (new, old))
+        self._exec("UPDATE refs SET path = ? WHERE path = ?", (new, old))
         if self.current_article == old:
             self.current_article = new
 
@@ -119,6 +132,24 @@ class Store:
     def message_article(self, message_id: int) -> str | None:
         rows = self._exec("SELECT path FROM messages WHERE message_id = ?", (message_id,))
         return rows[0][0] if rows else None
+
+    # короткие номера статей для callback_data (≤ 64 байт — путь не влезает)
+    def ref(self, path: str) -> int:
+        self._exec("INSERT OR IGNORE INTO refs(path) VALUES(?)", (path,))
+        return int(self._exec("SELECT id FROM refs WHERE path = ?", (path,))[0][0])
+
+    def ref_path(self, ref: int) -> str | None:
+        rows = self._exec("SELECT path FROM refs WHERE id = ?", (ref,))
+        return rows[0][0] if rows else None
+
+    # ForceReply-подсказки: message_id → (что ждём, аргумент)
+    def bind_prompt(self, message_id: int, kind: str, arg: str) -> None:
+        self._exec("INSERT OR REPLACE INTO prompts(message_id, kind, arg, created) VALUES(?, ?, ?, ?)",
+                   (message_id, kind, arg, time.time()))
+
+    def prompt(self, message_id: int) -> tuple[str, str] | None:
+        rows = self._exec("SELECT kind, arg FROM prompts WHERE message_id = ?", (message_id,))
+        return (rows[0][0], rows[0][1]) if rows else None
 
     # журнал задач
     def task_start(self, intent: str) -> int:
@@ -143,5 +174,9 @@ class Store:
         self._exec("DELETE FROM tasks WHERE id <= (SELECT MAX(id) FROM tasks) - ?", (KEEP_TASKS,))
         self._exec(
             "DELETE FROM messages WHERE message_id NOT IN (SELECT message_id FROM messages ORDER BY created DESC LIMIT ?)",
+            (KEEP_MESSAGES,),
+        )
+        self._exec(
+            "DELETE FROM prompts WHERE message_id NOT IN (SELECT message_id FROM prompts ORDER BY created DESC LIMIT ?)",
             (KEEP_MESSAGES,),
         )

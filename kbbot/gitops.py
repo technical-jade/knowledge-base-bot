@@ -23,6 +23,15 @@ class ConflictError(GitError):
 
 
 @dataclass
+class Commit:
+    sha: str
+    date: str  # YYYY-MM-DD
+    email: str
+    subject: str
+    files: list[str]
+
+
+@dataclass
 class Repo:
     path: Path
     name: str = "kb-bot"
@@ -77,6 +86,16 @@ class Repo:
 
     def outside_docs(self) -> list[str]:
         return [p for p in self.changed() if not p.startswith("docs/")]
+
+    def recent(self, n: int) -> list["Commit"]:
+        """Последние n коммитов с затронутыми файлами (для /recent)."""
+        out = self.git("log", f"-n{n}", "--format=%x1e%h%x1f%cs%x1f%ae%x1f%s", "--name-only")
+        commits = []
+        for block in out.split("\x1e")[1:]:
+            head, _, files = block.partition("\n")
+            sha, date, email, subject = head.split("\x1f", 3)
+            commits.append(Commit(sha, date, email, subject, [f for f in files.split("\n") if f]))
+        return commits
 
     def last_commit(self) -> tuple[str, str, str]:
         """(sha, email автора, тема)."""

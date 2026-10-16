@@ -14,6 +14,14 @@ class Article:
     title: str
     section: str
     description: str = ""
+    updated: str = ""
+
+
+# Иконки разделов по умолчанию; своя — поле icon во frontmatter index.md раздела
+DEFAULT_ICONS = {
+    "devops": "⚙️", "frontend": "🎨", "backend": "🗄", "networking": "🌐",
+    "tools": "🛠", "courses": "🎓", "misc": "📦",
+}
 
 
 def _meta(file: Path) -> dict:
@@ -51,6 +59,14 @@ def sections(repo: Path) -> dict[str, str]:
     return {key: title for _, title, key in sorted(found)}
 
 
+def icons(repo: Path) -> dict[str, str]:
+    out = {}
+    for key in sections(repo):
+        icon = _meta(repo / "docs" / key / "index.md").get("icon")
+        out[key] = str(icon) if icon else DEFAULT_ICONS.get(key, "📁")
+    return out
+
+
 def articles(repo: Path) -> list[Article]:
     """Статьи и учебники (учебник — его index.md; главы не перечисляются)."""
     docs = repo / "docs"
@@ -69,7 +85,9 @@ def articles(repo: Path) -> list[Article]:
         if section == "courses" and not (is_course and f.name == "index.md"):
             continue  # главы учебника
         m = _meta(f)
-        out.append(Article(rel, str(m.get("title") or f.stem), section, str(m.get("description") or "")))
+        upd = m.get("updated")
+        out.append(Article(rel, str(m.get("title") or f.stem), section, str(m.get("description") or ""),
+                           str(upd)[:10] if upd else ""))
     return out
 
 
@@ -81,3 +99,7 @@ def course_files(repo: Path, index_path: str) -> list[str]:
 
 def title_of(repo: Path, path: str) -> str:
     return str(_meta(repo / path).get("title") or Path(path).stem)
+
+
+def chapters(repo: Path, index_path: str) -> int:
+    return len([f for f in course_files(repo, index_path) if not f.endswith("/index.md")])
