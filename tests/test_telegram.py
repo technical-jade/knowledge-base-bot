@@ -108,15 +108,15 @@ def test_edit_in_place_and_fallbacks(tmp_path):
     bot = FakeBot()
     r = tg.TgResponder(bot, 1, Store(tmp_path / "s.db"))
     asyncio.run(r.edit(7, "**экран**", BTNS))
-    assert bot.edits[-1] == (7, "<b>экран</b>") and kb_data(bot.markups[-1])[1][1] == "ed:1"
+    assert bot.edits[-1] == (7, "<b>экран</b>\n" + tg.FILL) and kb_data(bot.markups[-1])[1][1] == "ed:1"
     asyncio.run(r.edit(None, "новое", BTNS))
-    assert bot.sent[-1][0] == "новое" and isinstance(bot.sent[-1][2], InlineKeyboardMarkup)
+    assert bot.sent[-1][0] == "новое\n" + tg.FILL and isinstance(bot.sent[-1][2], InlineKeyboardMarkup)
     bot2 = FakeBot(edit_error="Bad Request: message is not modified")
     asyncio.run(tg.TgResponder(bot2, 1, Store(tmp_path / "s2.db")).edit(7, "то же", BTNS))
     assert bot2.sent == []
     bot3 = FakeBot(edit_error="Bad Request: message to edit not found")
     asyncio.run(tg.TgResponder(bot3, 1, Store(tmp_path / "s3.db")).edit(7, "старое", BTNS))
-    assert bot3.sent[-1][0] == "старое"
+    assert bot3.sent[-1][0] == "старое\n" + tg.FILL
 
 
 def test_ask_uses_force_reply(tmp_path):
@@ -160,3 +160,30 @@ def test_callback_dispatch(tmp_path):
     cb.message = None  # сообщение слишком старое — недоступно
     asyncio.run(tg.on_action(FakeCore(), FakeBot(), cb))
     assert calls[-1] == ("card:5", None, 1)
+
+
+def test_messages_with_buttons_are_widened(tmp_path):
+    # Клавиатура не шире сообщения: невидимая строка растягивает его на весь экран
+    bot = FakeBot()
+    r = tg.TgResponder(bot, 1, Store(tmp_path / "s.db"))
+    asyncio.run(r.send("коротко", buttons=BTNS))
+    assert bot.sent[-1][0] == "коротко\n" + tg.FILL
+    asyncio.run(r.send("без кнопок"))
+    assert bot.sent[-1][0] == "без кнопок"
+    asyncio.run(r.edit(7, "экран", BTNS))
+    assert bot.edits[-1] == (7, "экран\n" + tg.FILL)
+
+    async def go():
+        await r.set_stop("stop:3")
+        await r.status("Пишу…")
+
+    asyncio.run(go())
+    assert bot.sent[-1][0].endswith("\n" + tg.FILL)
+    assert len(tg.FILL) >= 30 and set(tg.FILL) == {"⠀"}
+
+
+def test_long_message_with_buttons_stays_in_limit(tmp_path):
+    bot = FakeBot()
+    r = tg.TgResponder(bot, 1, Store(tmp_path / "s.db"))
+    asyncio.run(r.send("я" * 4090, buttons=BTNS))
+    assert all(len(t) <= 4096 for t, _, _ in bot.sent)

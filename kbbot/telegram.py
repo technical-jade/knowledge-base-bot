@@ -19,6 +19,13 @@ log = logging.getLogger("telegram")
 
 STATUS_EVERY = 3.0
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+# Клавиатура в Telegram не шире сообщения: невидимая строка (U+2800, не пробел —
+# пробелы обрезаются) растягивает короткое сообщение, а с ним и кнопки, на весь экран
+FILL = "\u2800" * 40
+
+
+def wide(md: str, buttons) -> str:
+    return f"{md}\n{FILL}" if buttons else md
 
 # Ожидающие выбора кнопки: токен → future
 _choices: dict[str, asyncio.Future] = {}
@@ -47,6 +54,7 @@ class TgResponder:
 
     async def send(self, md: str, article: str | None = None, buttons: list[list[Btn]] | None = None) -> int | None:
         await self._drop_status()
+        md = wide(md, buttons)
         last = None
         chunks = to_messages(md)
         for i, chunk in enumerate(chunks):
@@ -79,7 +87,7 @@ class TgResponder:
         if message_id is not None:
             try:
                 await self.bot.edit_message_text(
-                    to_messages(md)[0], chat_id=self.chat_id, message_id=message_id, parse_mode="HTML",
+                    to_messages(wide(md, buttons))[0], chat_id=self.chat_id, message_id=message_id, parse_mode="HTML",
                     link_preview_options=NO_PREVIEW, reply_markup=markup(buttons),
                 )
                 return
@@ -97,6 +105,9 @@ class TgResponder:
         )
         return msg.message_id
 
+    def _status_html(self) -> str:
+        return f"⏳ {esc(self._status_text)}" + (f"\n{FILL}" if self._stop else "")
+
     def _stop_markup(self) -> InlineKeyboardMarkup | None:
         return markup([[Btn("✖️ Остановить", self._stop)]]) if self._stop else None
 
@@ -111,7 +122,7 @@ class TgResponder:
         if self._status_id is None:
             try:
                 m = await self.bot.send_message(
-                    self.chat_id, f"⏳ {esc(text)}", parse_mode="HTML", disable_notification=True,
+                    self.chat_id, self._status_html(), parse_mode="HTML", disable_notification=True,
                     reply_markup=self._stop_markup(),
                 )
                 self._status_id = m.message_id
@@ -135,7 +146,7 @@ class TgResponder:
             return
         try:
             await self.bot.edit_message_text(
-                f"⏳ {esc(self._status_text)}", chat_id=self.chat_id, message_id=self._status_id, parse_mode="HTML",
+                self._status_html(), chat_id=self.chat_id, message_id=self._status_id, parse_mode="HTML",
                 reply_markup=self._stop_markup(),
             )
         except TelegramRetryAfter as e:
@@ -166,7 +177,7 @@ class TgResponder:
             inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=f"ch:{token}:{key}")] for key, label in options]
         )
         labels = dict(options)
-        msg = await self.bot.send_message(self.chat_id, to_messages(question)[0], parse_mode="HTML", reply_markup=kb)
+        msg = await self.bot.send_message(self.chat_id, to_messages(wide(question, True))[0], parse_mode="HTML", reply_markup=kb)
         fut = asyncio.get_running_loop().create_future()
         _choices[token] = fut
         try:
