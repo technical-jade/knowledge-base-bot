@@ -72,7 +72,8 @@ def section(site: str, key: str, secs: dict[str, str], icons: dict[str, str], ar
     items = [a for a in arts if a.section == key]
     pages = max(1, -(-len(items) // PAGE))
     page = min(max(page, 0), pages - 1)
-    head = f"{icons.get(key, '📁')} **{secs.get(key, key)}** — {_articles_word(len(items))}"
+    count = plural(len(items), "учебник", "учебника", "учебников") if key == "courses" else _articles_word(len(items))
+    head = f"{icons.get(key, '📁')} **{secs.get(key, key)}** — {count}"
     rows: list[list[Btn]] = []
     for a in items[page * PAGE : (page + 1) * PAGE]:
         r = ref(a.path)

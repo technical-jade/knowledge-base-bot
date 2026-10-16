@@ -198,3 +198,8 @@ def test_all_callback_data_fit_64_bytes_ascii():
                 assert len(b.label) <= 32
                 if b.action:
                     assert b.action.isascii() and len(b.action.encode()) <= 64
+
+
+def test_courses_section_counts_courses():
+    s = ui.section(SITE, "courses", SECS, ICONS, arts(2, "courses"), 0, ref)
+    assert "2 учебника" in s.md
