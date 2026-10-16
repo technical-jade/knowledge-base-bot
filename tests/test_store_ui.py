@@ -116,14 +116,12 @@ def test_section_rows_and_pagination():
     p0 = ui.section(SITE, "devops", SECS, ICONS, a, 0, ref)
     rows = p0.buttons
     assert len([r for r in rows if r[0].action.startswith("card:")]) == 10
-    first = rows[0]
     r0 = ref("docs/devops/a00.md")
-    assert [b.action for b in first] == [f"card:{r0}", f"ed:{r0}", f"del:{r0}"]
-    assert [b.label for b in first[1:]] == ["✏️", "🗑"]
+    assert [b.action for row in rows[:2] for b in row] == [f"card:{r0}", f"ed:{r0}", f"del:{r0}"]
     nav = rows[-2]
-    assert [b.label for b in nav] == ["1/3", "▶️"]
+    assert [b.label for b in nav] == ["Дальше ▶️"]
     p2 = ui.section(SITE, "devops", SECS, ICONS, a, 2, ref)
-    assert [b.label for b in p2.buttons[-2]] == ["◀️", "3/3"]
+    assert [b.label for b in p2.buttons[-2]] == ["◀️ Назад"]
     assert len([r for r in p2.buttons if r[0].action.startswith("card:")]) == 3
     assert [b.action for b in p0.buttons[-1]] == ["home", "new:devops"]
     assert "23 статьи" in p0.md
@@ -217,3 +215,38 @@ def test_all_callback_data_fit_64_bytes_ascii():
 def test_courses_section_counts_courses():
     s = ui.section(SITE, "courses", SECS, ICONS, arts(2, "courses"), 0, ref)
     assert "2 учебника" in s.md
+
+
+def _all_screens():
+    a = arts(23)
+    card_a = Article("docs/devops/x.md", "Docker volumes", "devops", "", "")
+    cs = [Commit("abc1234", "2026-10-16", "kb-bot@jade", "Статья: X", ["docs/devops/a00.md"])]
+    rows = [ui.home(SITE, SECS, ICONS, a).buttons, ui.section(SITE, "devops", SECS, ICONS, a, 1, ref).buttons,
+            ui.card(SITE, card_a, SECS, ICONS, ref, None).buttons, ui.move_targets(card_a, SECS, ICONS, ref).buttons,
+            ui.recent(cs, a, ref, "kb-bot@jade").buttons, ui.result_buttons(SITE, "docs/devops/x.md", ref),
+            ui.result_buttons(SITE, None, ref, deleted=True), ui.article_buttons(a, ref)]
+    return rows
+
+
+def test_layout_wide_buttons_pairs_only_short():
+    # Кнопка во всю ширину; по две в ряд — только короткие, без значков-огрызков
+    for buttons in _all_screens():
+        for row in buttons:
+            assert len(row) <= 2
+            if len(row) == 2:
+                assert all(len(b.label) <= ui.SHORT for b in row), row
+            assert all(len(b.label) >= 4 for b in row), row
+
+
+def test_section_title_row_then_actions_row():
+    s = ui.section(SITE, "devops", SECS, ICONS, arts(1), 0, ref)
+    r = ref("docs/devops/a00.md")
+    assert [b.action for b in s.buttons[0]] == [f"card:{r}"]
+    assert [(b.label, b.action) for b in s.buttons[1]] == [("✏️ Изменить", f"ed:{r}"), ("🗑 Удалить", f"del:{r}")]
+
+
+def test_section_nav_two_buttons_page_in_text():
+    a = arts(23)
+    p1 = ui.section(SITE, "devops", SECS, ICONS, a, 1, ref)
+    assert [b.action for b in p1.buttons[-2]] == ["sec:devops:0", "sec:devops:2"]
+    assert "стр. 2/3" in p1.md

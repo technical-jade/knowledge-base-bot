@@ -15,6 +15,8 @@ from .gitops import Commit
 
 PAGE = 10
 LABEL = 30
+# Кнопки по две в ряд — только если обе не длиннее: иначе на телефоне текст обрезается
+SHORT = 16
 
 # Быстрые правки: код → (кнопка, инструкция для [edit])
 PRESETS = {
@@ -66,8 +68,15 @@ def _articles_word(n: int) -> str:
     return plural(n, "статья", "статьи", "статей")
 
 
-def _grid(btns: list[Btn], per_row: int = 2) -> list[list[Btn]]:
-    return [btns[i : i + per_row] for i in range(0, len(btns), per_row)]
+def pack(btns: list[Btn]) -> list[list[Btn]]:
+    """Раскладка: каждая кнопка во всю ширину, две короткие подряд — в один ряд."""
+    rows: list[list[Btn]] = []
+    for b in btns:
+        if rows and len(rows[-1]) == 1 and len(rows[-1][0].label) <= SHORT and len(b.label) <= SHORT:
+            rows[-1].append(b)
+        else:
+            rows.append([b])
+    return rows
 
 
 def home(site: str, secs: dict[str, str], icons: dict[str, str], arts: list[Article]) -> Screen:
@@ -75,7 +84,7 @@ def home(site: str, secs: dict[str, str], icons: dict[str, str], arts: list[Arti
     btns = [Btn(short(f"{icons.get(k, '📁')} {t} ({count[k]})", LABEL + 2), f"sec:{k}:0" if safe_key(k) else "noop")
             for k, t in secs.items()]
     md = f"📚 **База знаний** — {_articles_word(len(arts))}\n{site}"
-    return Screen(md, _grid(btns) + [[Btn("🕘 Недавние", "recent")]])
+    return Screen(md, pack(btns) + [[Btn("🕘 Недавние", "recent")]])
 
 
 def section(site: str, key: str, secs: dict[str, str], icons: dict[str, str], arts: list[Article], page: int, ref: Ref) -> Screen:
@@ -84,17 +93,19 @@ def section(site: str, key: str, secs: dict[str, str], icons: dict[str, str], ar
     page = min(max(page, 0), pages - 1)
     count = plural(len(items), "учебник", "учебника", "учебников") if key == "courses" else _articles_word(len(items))
     head = f"{icons.get(key, '📁')} **{secs.get(key, key)}** — {count}"
+    if pages > 1:
+        head += f", стр. {page + 1}/{pages}"
     rows: list[list[Btn]] = []
     for a in items[page * PAGE : (page + 1) * PAGE]:
         r = ref(a.path)
-        rows.append([Btn(short(a.title), f"card:{r}"), Btn("✏️", f"ed:{r}"), Btn("🗑", f"del:{r}")])
+        rows.append([Btn(short(f"📄 {a.title}"), f"card:{r}")])
+        rows.append([Btn("✏️ Изменить", f"ed:{r}"), Btn("🗑 Удалить", f"del:{r}")])
     if pages > 1:
         nav = []
         if page > 0:
-            nav.append(Btn("◀️", f"sec:{key}:{page - 1}"))
-        nav.append(Btn(f"{page + 1}/{pages}", "noop"))
+            nav.append(Btn("◀️ Назад", f"sec:{key}:{page - 1}"))
         if page < pages - 1:
-            nav.append(Btn("▶️", f"sec:{key}:{page + 1}"))
+            nav.append(Btn("Дальше ▶️", f"sec:{key}:{page + 1}"))
         rows.append(nav)
     rows.append([Btn("⬅️ Разделы", "home"), Btn("➕ Новая", f"new:{key}")])
     md = head + ("\n\nПока пусто — добавьте статью кнопкой «➕ Новая»." if not items else "")
@@ -120,7 +131,8 @@ def card(site: str, a: Article, secs: dict[str, str], icons: dict[str, str], ref
     if not is_course(a):
         first.append(Btn("🔀 Перенести", f"mv:{r}"))
     presets = [Btn(label, f"q:{code}:{r}") for code, (label, _) in PRESETS.items()]
-    return Screen("\n".join(lines), [first, presets, [Btn("🗑 Удалить", f"del:{r}"), Btn(short(f"⬅️ {sec}"), f"sec:{a.section}:0")]])
+    last = [Btn("🗑 Удалить", f"del:{r}"), Btn(short(f"⬅️ {sec}"), f"sec:{a.section}:0")]
+    return Screen("\n".join(lines), pack(first) + pack(presets) + pack(last))
 
 
 def move_targets(a: Article, secs: dict[str, str], icons: dict[str, str], ref: Ref) -> Screen:
@@ -128,7 +140,7 @@ def move_targets(a: Article, secs: dict[str, str], icons: dict[str, str], ref: R
     btns = [Btn(short(f"{icons.get(k, '📁')} {t}"), f"mvto:{r}:{k}") for k, t in secs.items()
             if k not in (a.section, "courses") and safe_key(k)]
     md = f"🔀 Куда перенести «{a.title}»?" + ("" if btns else "\n\nДругих разделов нет.")
-    return Screen(md, _grid(btns) + [[Btn("⬅️ Назад", f"card:{r}")]])
+    return Screen(md, pack(btns) + [[Btn("⬅️ Назад", f"card:{r}")]])
 
 
 def _article_of(file: str, by_path: dict[str, Article]) -> Article | None:
@@ -166,10 +178,10 @@ def result_buttons(site: str, path: str | None, ref: Ref, deleted: bool = False)
     if deleted or not path:
         return [[Btn("↩️ Отменить", "undo"), Btn("📚 Список", "+home")]]
     r = ref(path)
-    first = [Btn("🌐 Открыть", url=url(site, path)), Btn("✏️", f"ed:{r}")]
+    btns = [Btn("🌐 Открыть", url=url(site, path)), Btn("✏️ Править", f"ed:{r}")]
     if not path.startswith("docs/courses/"):
-        first.append(Btn("🔀", f"+mv:{r}"))
-    return [first, [Btn("↩️ Отменить", "undo"), Btn("🗑", f"del:{r}")]]
+        btns.append(Btn("🔀 Перенести", f"+mv:{r}"))
+    return pack(btns) + pack([Btn("↩️ Отменить", "undo"), Btn("🗑 Удалить", f"del:{r}")])
 
 
 def article_buttons(arts: list[Article], ref: Ref) -> list[list[Btn]]:
