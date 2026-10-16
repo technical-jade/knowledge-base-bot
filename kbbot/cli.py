@@ -3,6 +3,8 @@
     kb-bot-cli "напиши гайд по Docker volumes"
     kb-bot-cli --choose dev "напиши гайд по Docker volumes"
     kb-bot-cli --reply 1000000007 "сделай короче"
+    kb-bot-cli --press home                 # нажать кнопку (код из [метка код])
+    kb-bot-cli --press card:3 --msg 1000000012
     kb-bot-cli --tasks
 """
 
@@ -30,14 +32,36 @@ class CliResponder:
     def _ts(self) -> str:
         return f"[{time.monotonic() - self.t0:6.1f}s]"
 
-    async def send(self, md: str, article: str | None = None) -> int:
+    def _seq(self) -> int:
         seq = int(self.core.store.get("cli_msg_seq") or CLI_ID_BASE) + 1
         self.core.store.set("cli_msg_seq", str(seq))
+        return seq
+
+    @staticmethod
+    def _buttons(buttons) -> str:
+        rows = [" ".join(f"[{b.label} {b.url or b.action}]" for b in row) for row in buttons or []]
+        return "".join(f"   {r}\n" for r in rows)
+
+    async def send(self, md: str, article: str | None = None, buttons=None) -> int:
+        seq = self._seq()
         if article:
             self.core.store.bind_message(seq, article)
         self.messages.append(md)
-        print(f"{self._ts()} 💬 #{seq}" + (f" (статья {article})" if article else "") + f"\n{md}\n", flush=True)
+        print(f"{self._ts()} 💬 #{seq}" + (f" (статья {article})" if article else "") + f"\n{md}\n{self._buttons(buttons)}", flush=True)
         return seq
+
+    async def edit(self, message_id: int | None, md: str, buttons=None) -> None:
+        self.messages.append(md)
+        print(f"{self._ts()} ✎ #{message_id}\n{md}\n{self._buttons(buttons)}", flush=True)
+
+    async def ask(self, md: str) -> int:
+        seq = self._seq()
+        print(f"{self._ts()} ↩️ #{seq} (ответ: --reply {seq} \"текст\")\n{md}\n", flush=True)
+        return seq
+
+    async def set_stop(self, action: str | None) -> None:
+        if action:
+            print(f"{self._ts()} [✖️ {action}]", flush=True)
 
     async def status(self, text: str) -> None:
         print(f"{self._ts()} ⏳ {text}", flush=True)
@@ -64,6 +88,8 @@ async def main() -> int:
     ap.add_argument("--reply", type=int, help="ответ на сообщение с этим id")
     ap.add_argument("--choose", help="ответ на кнопки (стиль: simple/dev/reference/course; подтверждение: yes/no)")
     ap.add_argument("--tasks", action="store_true", help="журнал задач")
+    ap.add_argument("--press", help="нажать кнопку: код действия, например home, card:3, q:short:3")
+    ap.add_argument("--msg", type=int, help="id сообщения с кнопкой (для --press)")
     ap.add_argument("text", nargs="*")
     a = ap.parse_args()
     try:
@@ -81,6 +107,9 @@ async def main() -> int:
             tid, started, intent, result, detail, sha, dur = row
             print(f"{tid:4} {time.strftime('%m-%d %H:%M', time.localtime(started))} {intent:9} {result or '…':8} "
                   f"{(dur or 0):6.0f}s {sha or '':8} {(detail or '')[:60]}")
+        return 0
+    if a.press:
+        await core.handle_action(a.press, CliResponder(core, a.choose), a.msg)
         return 0
     text = " ".join(a.text)
     if not text:
